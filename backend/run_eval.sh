@@ -10,17 +10,17 @@ export GOOGLE_GENAI_USE_VERTEXAI=true
 export TRIAGE_MODEL="${TRIAGE_MODEL:-gemini-2.5-flash}"
 export EVAL_WORKERS="${EVAL_WORKERS:-2}"
 
-# The user account gets 403 on aiplatform.endpoints.predict in Cloud Shell, but
-# the beacon-vertex service account works. A fresh Cloud Shell session drops any
-# manual `export`, so auto-use the SA key if it's present in the home dir.
-if [ -z "${GOOGLE_APPLICATION_CREDENTIALS:-}" ] && [ -f "$HOME/beacon-sa-key.json" ]; then
+# IMPORTANT: always prefer our dedicated rapidbuildsingapore SA key, overriding any
+# stale GOOGLE_APPLICATION_CREDENTIALS inherited from the Cloud Shell profile
+# (e.g. a different project's service-account.json that 403s on Vertex here).
+if [ -f "$HOME/beacon-sa-key.json" ]; then
   export GOOGLE_APPLICATION_CREDENTIALS="$HOME/beacon-sa-key.json"
-fi
-
-if [ -n "${GOOGLE_APPLICATION_CREDENTIALS:-}" ]; then
   echo "Auth    : service account ($GOOGLE_APPLICATION_CREDENTIALS)"
+elif [ -n "${GOOGLE_APPLICATION_CREDENTIALS:-}" ]; then
+  echo "Auth    : INHERITED key ($GOOGLE_APPLICATION_CREDENTIALS) — may be the wrong project!"
+  echo "          Create ~/beacon-sa-key.json (see README) to fix 403s."
 else
-  echo "Auth    : default ADC — WARNING: ~/beacon-sa-key.json not found, will likely 403"
+  echo "Auth    : default ADC"
 fi
 
 echo "Project : $GOOGLE_CLOUD_PROJECT"
