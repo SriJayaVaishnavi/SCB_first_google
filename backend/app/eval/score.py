@@ -7,13 +7,15 @@ Run in Cloud Shell:  python -m app.eval.score
 """
 from __future__ import annotations
 
+import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 
 from app.agents.triage import triage_message
 from app.data_loader import load_dataset
 
-MAX_WORKERS = 8
+# Low default to stay under new-project Gemini quota; override with EVAL_WORKERS.
+MAX_WORKERS = int(os.getenv("EVAL_WORKERS", "2"))
 
 
 def evaluate(predictions: list[dict]) -> dict:

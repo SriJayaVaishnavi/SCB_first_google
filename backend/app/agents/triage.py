@@ -7,10 +7,12 @@ model's confidence is below the floor, round the severity up one tier.
 from __future__ import annotations
 
 import json
+import time
 from functools import lru_cache
 
 from google import genai
 from google.genai import types
+from google.genai.errors import ClientError
 
 from app.config import CONFIDENCE_FLOOR, LOCATION, PROJECT, TRIAGE_MODEL, USE_VERTEXAI
 from app.schemas import ESCALATE_UP, Severity, TriageResult
@@ -41,6 +43,23 @@ def _client() -> genai.Client:
     return genai.Client()  # falls back to GEMINI_API_KEY if Vertex disabled
 
 
+def _generate_with_backoff(client, model, contents, config, max_retries=6):
+    """Call Gemini, retrying on 429 RESOURCE_EXHAUSTED with exponential backoff.
+
+    New projects start with low Gemini quota; this keeps us under the rate limit.
+    """
+    delay = 4.0
+    for attempt in range(max_retries):
+        try:
+            return client.models.generate_content(model=model, contents=contents, config=config)
+        except ClientError as e:
+            if getattr(e, "code", None) == 429 and attempt < max_retries - 1:
+                time.sleep(delay)
+                delay = min(delay * 2, 60)
+                continue
+            raise
+
+
 def triage_message(
     text: str,
     sop: str,
@@ -52,10 +71,11 @@ def triage_message(
     client = client or _client()
     prompt = PROMPT_TEMPLATE.format(sop=sop, feed=json.dumps(feed), message=text)
 
-    resp = client.models.generate_content(
-        model=model or TRIAGE_MODEL,
-        contents=prompt,
-        config=types.GenerateContentConfig(
+    resp = _generate_with_backoff(
+        client,
+        model or TRIAGE_MODEL,
+        prompt,
+        types.GenerateContentConfig(
             system_instruction=SYSTEM_INSTRUCTION,
             temperature=0.0,
             response_mime_type="application/json",
