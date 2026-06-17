@@ -135,6 +135,16 @@ def _is_rate_limit(exc: Exception) -> bool:
     return "429" in blob or "RESOURCE_EXHAUSTED" in blob or "ResourceExhausted" in blob
 
 
+# Live API-call meter — every _invoke attempt (incl. retries) hits Vertex once and burns
+# quota. Surfaced in the demo so we always see how many LLM calls a run actually made.
+_api_calls = {"total": 0, "by_agent": {}}
+
+
+def _count_call(agent_name: str) -> None:
+    _api_calls["total"] += 1
+    _api_calls["by_agent"][agent_name] = _api_calls["by_agent"].get(agent_name, 0) + 1
+
+
 async def _run_async(agent: LlmAgent, text: str, *, max_retries: int = 6) -> str:
     """Invoke an ADK agent with exponential backoff on Vertex 429s.
 
@@ -147,6 +157,7 @@ async def _run_async(agent: LlmAgent, text: str, *, max_retries: int = 6) -> str
     delay = 4.0
     for attempt in range(max_retries):
         try:
+            _count_call(agent.name)
             return await _invoke(agent, text)
         except Exception as exc:  # noqa: BLE001 — narrowed via _is_rate_limit below
             if _is_rate_limit(exc) and attempt < max_retries - 1:
@@ -294,13 +305,16 @@ def _pick_demo_batch(messages: list[dict]) -> list[dict]:
                 seen.add(m["id"])
                 return
 
-    for label in ("P1", "P2", "P3", "P4"):
-        take(lambda m, lbl=label: m.get("true_label") == lbl)
-    # Show Intake translation: a real non-English message if the data has one, else the synthetic one.
+    # Order so a small slice (batch_size) still shows all 3 handoffs with the fewest
+    # calls: P1→Escalation, P4→Responder, non-EN→translation, then P2, P3 to fill out.
+    take(lambda m: m.get("true_label") == "P1")
+    take(lambda m: m.get("true_label") == "P4")
     before = len(batch)
-    take(lambda m: m.get("lang") != "en")
+    take(lambda m: m.get("lang") != "en")  # real non-English message if the data has one…
     if len(batch) == before:
-        batch.append(_DEMO_NON_EN)
+        batch.append(_DEMO_NON_EN)          # …else the synthetic Thai one
+    take(lambda m: m.get("true_label") == "P2")
+    take(lambda m: m.get("true_label") == "P3")
     return batch
 
 
@@ -332,23 +346,27 @@ def _swarm_demo(batch_size: int | None = None) -> None:
         batch_size = int(os.getenv("DEMO_BATCH_SIZE", str(len(batch))))
     batch = batch[:batch_size]
     pace = float(os.getenv("DEMO_PACE_SEC", "0"))
+    # Call budget so we know the cost before we spend it: 2 calls/msg (Intake+Triage)
+    # + 1 for the P1/P2/P4 handoff (P3 has none). Retries add to the live meter.
+    est = sum(2 + (0 if m.get("true_label") == "P3" else 1) for m in batch)
     print(f"Running the Beacon swarm over {len(batch)} sample messages "
-          f"(pace {pace:.0f}s)…")
+          f"(pace {pace:.0f}s). Estimated API calls (no retries): ~{est}…")
 
     try:
         queue = run_swarm(batch, pace_sec=pace)
     except Exception as exc:  # noqa: BLE001
         if _is_rate_limit(exc):
-            print("\n[!] Vertex quota (429) exhausted before the batch finished.")
+            print(f"\n[!] Vertex quota (429) exhausted after {_api_calls['total']} API calls.")
             print("    The swarm logic is fine — this is a quota wall. Options:")
             print("    • request a gemini-2.5-flash quota bump in us-central1, or")
-            print("    • retry with a smaller/paced batch, e.g.:")
-            print("        DEMO_BATCH_SIZE=2 DEMO_PACE_SEC=20 python -m app.agents.adk_agents")
+            print("    • retry smaller/paced: DEMO_BATCH_SIZE=2 DEMO_PACE_SEC=20 python -m app.agents.adk_agents")
+            print(f"    API calls by agent: {_api_calls['by_agent']}")
             return
         raise
 
     _print_queue(queue)
-    print("Swarm demo OK — Intake→Triage→Escalation/Responder with ranked queue + trace.")
+    print(f"Swarm demo OK — Intake→Triage→Escalation/Responder, ranked queue + trace.")
+    print(f"API calls made: {_api_calls['total']} (by agent: {_api_calls['by_agent']})")
 
 
 def _smoke_test() -> None:
