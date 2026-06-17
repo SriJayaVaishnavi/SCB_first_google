@@ -397,6 +397,18 @@ async def run_swarm_async(messages: list[dict], *, pace_sec: float = 0.0) -> lis
     return cases
 
 
+async def stream_swarm(messages: list[dict], *, pace_sec: float = 0.0):
+    """Async generator: yield each SwarmCase the moment it's triaged (for SSE).
+
+    Unsorted — emit order is arrival order; the dashboard ranks the live queue by danger.
+    Lets the UI watch the surge stream in and P1s jump to the top in real time.
+    """
+    for i, m in enumerate(messages):
+        if i and pace_sec:
+            await asyncio.sleep(pace_sec)
+        yield await _swarm_case(m)
+
+
 def run_swarm(messages: list[dict], *, pace_sec: float = 0.0) -> list[SwarmCase]:
     """Sync entrypoint: run the swarm in a single event loop."""
     return asyncio.run(run_swarm_async(messages, pace_sec=pace_sec))
