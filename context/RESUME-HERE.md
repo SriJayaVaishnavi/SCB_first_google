@@ -64,6 +64,10 @@ Chosen idea = **Option C: Triage Agent Swarm**. Spec + plan written & committed.
 - **NO terminal `export`** (user preference): all config lives in persistent `backend/.env`;
   `config.py` uses `load_dotenv(override=True)` so it beats any stale shell var. Recreate-`.env`
   command + the full error ledger are in `context/BUILD-LOG.md`.
+- **TWO MODES** (one `.env` flag, both code paths live — nothing commented out):
+  `GOOGLE_GENAI_USE_VERTEXAI=false` → **AI Studio** (Gemini Developer API, needs `GOOGLE_API_KEY`)
+  — ACTIVE NOW because the Vertex per-day quota is drained. Flip to `true` → **Vertex** (needs
+  project/location + the beacon SA key) — the plan for tomorrow. See `app/config.py` (`MODE`).
 
 ## Workflow
 Claude (Windows) writes code → commits → pushes. User pulls in **Cloud Shell** and runs (Cloud
