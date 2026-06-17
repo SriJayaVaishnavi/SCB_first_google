@@ -2,11 +2,10 @@
 
 Starts with the Triage agent rebuilt as a real Google ADK LlmAgent. Run this module
 directly as a smoke test to confirm the ADK API in the current environment before we
-expand to the full swarm:
+expand to the full swarm. Config (project, location, SA key path) comes from
+backend/.env — no terminal `export` needed:
 
-    cd backend && bash -c 'export GOOGLE_APPLICATION_CREDENTIALS=~/beacon-sa-key.json; \
-      GOOGLE_GENAI_USE_VERTEXAI=true GOOGLE_CLOUD_PROJECT=rapidbuildsingapore \
-      GOOGLE_CLOUD_LOCATION=us-central1 python -m app.agents.adk_agents'
+    cd backend && python -m app.agents.adk_agents
 """
 from __future__ import annotations
 

@@ -6,7 +6,11 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-load_dotenv()
+# override=True so values in backend/.env always win over any stale variable already
+# in the shell (e.g. a Cloud Shell profile's leftover GOOGLE_APPLICATION_CREDENTIALS
+# pointing at another project's SA key, which 403s on Vertex here). Lets us configure
+# everything via the persistent .env file with no terminal `export` needed.
+load_dotenv(override=True)
 
 DATA_DIR = Path(__file__).parent / "data"
 
