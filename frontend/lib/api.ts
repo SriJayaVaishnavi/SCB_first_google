@@ -1,7 +1,10 @@
 import type { Health, Stats, SwarmCase } from "./types";
 
+// Production bakes NEXT_PUBLIC_API_URL at build → call the backend directly.
+// Dev (incl. Cloud Shell) leaves it unset → use the same-origin "/beacon" proxy
+// (see next.config rewrites), which dodges CORS and the Web Preview auth gateway.
 export const API_BASE =
-  process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, "") || "http://localhost:8000";
+  process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, "") || "/beacon";
 
 export async function getHealth(): Promise<Health> {
   const r = await fetch(`${API_BASE}/`, { cache: "no-store" });
