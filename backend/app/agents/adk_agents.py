@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-import time
+import os
 
 from google.adk.agents import LlmAgent
 from google.adk.runners import InMemoryRunner
@@ -135,52 +135,117 @@ def _is_rate_limit(exc: Exception) -> bool:
     return "429" in blob or "RESOURCE_EXHAUSTED" in blob or "ResourceExhausted" in blob
 
 
-def _run(agent: LlmAgent, text: str, *, max_retries: int = 6) -> str:
+async def _run_async(agent: LlmAgent, text: str, *, max_retries: int = 6) -> str:
     """Invoke an ADK agent with exponential backoff on Vertex 429s.
 
     ADK does its own brief retries then raises; new-project Gemini quota is low, so we
     back off and retry here (mirrors the direct-genai path's _generate_with_backoff).
+    Async so the whole swarm shares one event loop (per-call asyncio.run() left the
+    genai HTTP client's cleanup orphaned → "Event loop is closed" noise, and would
+    break the async FastAPI handlers in Phase 5).
     """
     delay = 4.0
     for attempt in range(max_retries):
         try:
-            return asyncio.run(_invoke(agent, text))
-        except Exception as exc:  # noqa: BLE001 — narrow via _is_rate_limit below
+            return await _invoke(agent, text)
+        except Exception as exc:  # noqa: BLE001 — narrowed via _is_rate_limit below
             if _is_rate_limit(exc) and attempt < max_retries - 1:
                 print(f"    [429 rate-limited on {agent.name}; retrying in {delay:.0f}s…]")
-                time.sleep(delay)
+                await asyncio.sleep(delay)
                 delay = min(delay * 2, 60)
                 continue
             raise
     raise RuntimeError("unreachable")  # pragma: no cover
 
 
-def triage_via_adk(text: str) -> TriageResult:
-    return TriageResult.model_validate_json(_run(triage_agent, text))
-
-
-def intake_via_adk(text: str) -> IntakeResult:
-    return IntakeResult.model_validate_json(_run(intake_agent, text))
-
-
-def escalation_via_adk(text: str, triage: TriageResult) -> EscalationDecision:
-    case = (
+def _escalation_prompt(text: str, triage: TriageResult) -> str:
+    return (
         f"Severity: {triage.severity.value}\n"
         f"Category: {triage.category}\n"
         f"Triage reason: {triage.reason}\n"
         f"SOP reference: {triage.sop_reference}\n"
         f'Citizen message: """{text}"""'
     )
-    return EscalationDecision.model_validate_json(_run(escalation_agent, case))
+
+
+def _responder_prompt(text: str, triage: TriageResult) -> str:
+    return f'Routine query (category {triage.category}):\n"""{text}"""'
+
+
+# Async agent calls (the swarm's building blocks).
+async def _intake(text: str) -> IntakeResult:
+    return IntakeResult.model_validate_json(await _run_async(intake_agent, text))
+
+
+async def _triage(text: str) -> TriageResult:
+    return TriageResult.model_validate_json(await _run_async(triage_agent, text))
+
+
+async def _escalation(text: str, triage: TriageResult) -> EscalationDecision:
+    raw = await _run_async(escalation_agent, _escalation_prompt(text, triage))
+    return EscalationDecision.model_validate_json(raw)
+
+
+async def _responder(text: str, triage: TriageResult) -> ResponderDraft:
+    raw = await _run_async(responder_agent, _responder_prompt(text, triage))
+    return ResponderDraft.model_validate_json(raw)
+
+
+# Sync one-shot wrappers (smoke test / external callers running outside a loop).
+def triage_via_adk(text: str) -> TriageResult:
+    return asyncio.run(_triage(text))
+
+
+def intake_via_adk(text: str) -> IntakeResult:
+    return asyncio.run(_intake(text))
+
+
+def escalation_via_adk(text: str, triage: TriageResult) -> EscalationDecision:
+    return asyncio.run(_escalation(text, triage))
 
 
 def responder_via_adk(text: str, triage: TriageResult) -> ResponderDraft:
-    query = f'Routine query (category {triage.category}):\n"""{text}"""'
-    return ResponderDraft.model_validate_json(_run(responder_agent, query))
+    return asyncio.run(_responder(text, triage))
 
 
-def run_swarm(messages: list[dict]) -> list[SwarmCase]:
-    """Run the full Beacon swarm over a batch of inbound messages.
+async def _swarm_case(m: dict) -> SwarmCase:
+    text = m.get("text", "")
+    trace: list[str] = []
+
+    intake = await _intake(text)
+    trace.append(f"Intake → lang={intake.language}, translated={intake.translated}")
+
+    triage = await _triage(intake.normalized_text)
+    trace.append(
+        f"Triage → {triage.severity.value} {triage.category} "
+        f"(conf {triage.confidence:.2f}, {triage.sop_reference})"
+    )
+
+    escalation: EscalationDecision | None = None
+    responder: ResponderDraft | None = None
+    if triage.severity in (Severity.P1, Severity.P2):
+        escalation = await _escalation(text, triage)
+        trace.append(f"Escalation → {escalation.target_mission}: {escalation.suggested_action}")
+    elif triage.severity is Severity.P4:
+        responder = await _responder(text, triage)
+        trace.append("Responder → drafted reply (awaiting human confirm)")
+    else:  # P3
+        trace.append("Hold → P3 queued for officer assistance")
+
+    return SwarmCase(
+        id=m.get("id", ""),
+        channel=m.get("channel", ""),
+        original_text=text,
+        intake=intake,
+        triage=triage,
+        escalation=escalation,
+        responder=responder,
+        trace=trace,
+    )
+
+
+async def run_swarm_async(messages: list[dict], *, pace_sec: float = 0.0) -> list[SwarmCase]:
+    """Run the full Beacon swarm over a batch of inbound messages (one event loop).
 
     Per message: Intake → Triage, then a danger-aware handoff —
       • P1/P2 → Escalation (route to a mission with a suggested action)
@@ -188,47 +253,21 @@ def run_swarm(messages: list[dict]) -> list[SwarmCase]:
       • P4    → Responder (drafts a safe reply for human confirmation)
     Returns the cases ranked by danger (P1 first, ties broken by confidence), each
     carrying an ordered agent-handoff trace. Nothing is auto-dismissed.
+
+    pace_sec inserts a gap between messages to stay under a tight per-minute quota.
     """
     cases: list[SwarmCase] = []
-    for m in messages:
-        text = m.get("text", "")
-        trace: list[str] = []
-
-        intake = intake_via_adk(text)
-        trace.append(f"Intake → lang={intake.language}, translated={intake.translated}")
-
-        triage = triage_via_adk(intake.normalized_text)
-        trace.append(
-            f"Triage → {triage.severity.value} {triage.category} "
-            f"(conf {triage.confidence:.2f}, {triage.sop_reference})"
-        )
-
-        escalation: EscalationDecision | None = None
-        responder: ResponderDraft | None = None
-        if triage.severity in (Severity.P1, Severity.P2):
-            escalation = escalation_via_adk(text, triage)
-            trace.append(f"Escalation → {escalation.target_mission}: {escalation.suggested_action}")
-        elif triage.severity is Severity.P4:
-            responder = responder_via_adk(text, triage)
-            trace.append("Responder → drafted reply (awaiting human confirm)")
-        else:  # P3
-            trace.append("Hold → P3 queued for officer assistance")
-
-        cases.append(
-            SwarmCase(
-                id=m.get("id", ""),
-                channel=m.get("channel", ""),
-                original_text=text,
-                intake=intake,
-                triage=triage,
-                escalation=escalation,
-                responder=responder,
-                trace=trace,
-            )
-        )
-
+    for i, m in enumerate(messages):
+        if i and pace_sec:
+            await asyncio.sleep(pace_sec)
+        cases.append(await _swarm_case(m))
     cases.sort(key=lambda c: (c.triage.severity.rank, -c.triage.confidence))
     return cases
+
+
+def run_swarm(messages: list[dict], *, pace_sec: float = 0.0) -> list[SwarmCase]:
+    """Sync entrypoint: run the swarm in a single event loop."""
+    return asyncio.run(run_swarm_async(messages, pace_sec=pace_sec))
 
 
 # The synthetic dataset is English-only, so inject one non-English message to exercise
@@ -265,15 +304,8 @@ def _pick_demo_batch(messages: list[dict]) -> list[dict]:
     return batch
 
 
-def _swarm_demo() -> None:
-    import google.adk
-
-    print(f"google-adk version: {getattr(google.adk, '__version__', 'unknown')}\n")
-    batch = _pick_demo_batch(_ds.all_messages)
-    print(f"Running the Beacon swarm over {len(batch)} sample messages…\n")
-    queue = run_swarm(batch)
-
-    print(f"=== Beacon swarm — ranked queue ({len(queue)} cases) ===\n")
+def _print_queue(queue: list[SwarmCase]) -> None:
+    print(f"\n=== Beacon swarm — ranked queue ({len(queue)} cases) ===\n")
     for i, c in enumerate(queue, 1):
         print(f"#{i}  [{c.triage.severity.value}] conf={c.triage.confidence:.2f}  "
               f"{c.id} ({c.channel})  cat={c.triage.category}")
@@ -283,6 +315,39 @@ def _swarm_demo() -> None:
         if c.responder:
             print(f"    draft: {c.responder.draft_reply}")
         print(f"    trace: {' | '.join(c.trace)}\n")
+
+
+def _swarm_demo(batch_size: int | None = None) -> None:
+    """Run the swarm over a small batch and print the ranked queue.
+
+    DEMO_BATCH_SIZE caps the message count (handy under a tight quota); DEMO_PACE_SEC
+    inserts a gap between messages. Degrades gracefully: on a quota exhaustion it prints
+    what completed and a clear next step instead of a raw traceback.
+    """
+    import google.adk
+
+    print(f"google-adk version: {getattr(google.adk, '__version__', 'unknown')}\n")
+    batch = _pick_demo_batch(_ds.all_messages)
+    if batch_size is None:
+        batch_size = int(os.getenv("DEMO_BATCH_SIZE", str(len(batch))))
+    batch = batch[:batch_size]
+    pace = float(os.getenv("DEMO_PACE_SEC", "0"))
+    print(f"Running the Beacon swarm over {len(batch)} sample messages "
+          f"(pace {pace:.0f}s)…")
+
+    try:
+        queue = run_swarm(batch, pace_sec=pace)
+    except Exception as exc:  # noqa: BLE001
+        if _is_rate_limit(exc):
+            print("\n[!] Vertex quota (429) exhausted before the batch finished.")
+            print("    The swarm logic is fine — this is a quota wall. Options:")
+            print("    • request a gemini-2.5-flash quota bump in us-central1, or")
+            print("    • retry with a smaller/paced batch, e.g.:")
+            print("        DEMO_BATCH_SIZE=2 DEMO_PACE_SEC=20 python -m app.agents.adk_agents")
+            return
+        raise
+
+    _print_queue(queue)
     print("Swarm demo OK — Intake→Triage→Escalation/Responder with ranked queue + trace.")
 
 
@@ -304,10 +369,12 @@ def _smoke_test() -> None:
 
 if __name__ == "__main__":
     # `python -m app.agents.adk_agents`        → full swarm demo on a small batch
+    # `python -m app.agents.adk_agents 2`      → swarm demo capped to 2 messages
     # `python -m app.agents.adk_agents smoke`  → just the Triage smoke test
     import sys
 
-    if len(sys.argv) > 1 and sys.argv[1] == "smoke":
+    arg = sys.argv[1] if len(sys.argv) > 1 else ""
+    if arg == "smoke":
         _smoke_test()
     else:
-        _swarm_demo()
+        _swarm_demo(batch_size=int(arg) if arg.isdigit() else None)

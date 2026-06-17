@@ -23,6 +23,7 @@ Times are local (Asia/Kolkata, the dev machine). Commit hashes link to the repo
 | 14:08 | Run smoke test | ✅ **PASS** — `[P1]` trapped-child (conf 1.00), `[P4]` flight-status (conf 1.00), "ADK smoke test OK"; ADK v1.27.2 | — | — |
 | ~14:20 | Full swarm built (`d60d4db`) | Intake/Escalation/Responder + `run_swarm()` + 5-msg demo | — | — |
 | 14:30 | Run swarm demo | `429 RESOURCE_EXHAUSTED` on the first Intake call | the ADK rebuild **lost the backoff** the direct-genai path had; ADK's own retries gave up; the swarm fires ~2–3 calls/msg and burst-tripped the low new-project Vertex quota | add `_run()` backoff wrapper (4→60s, 6 retries) around every ADK invoke (`triage/intake/escalation/responder`) — mirrors `triage.py`'s `_generate_with_backoff` |
+| 14:36 | Re-run swarm demo (`8fc7442`) | backoff **works** (Intake+Triage of msg 1 passed) but Escalation kept 429ing → user Ctrl-C'd; also `Task exception … Event loop is closed` spam | (a) **quota wall**: gemini-2.5-flash per-minute quota is effectively near-zero, so ~12 sequential calls can't sustain even with backoff; (b) **bug**: per-call `asyncio.run()` opened/closed a new event loop each call, orphaning the genai HTTP client's async cleanup | (b) refactor swarm to one event loop — async `_run_async`/`run_swarm_async`, sync wrappers via single `asyncio.run`; demo now degrades gracefully + `DEMO_BATCH_SIZE`/`DEMO_PACE_SEC`. (a) needs a **Vertex quota bump** (decision pending) |
 
 **Region note (locked earlier):** `asia-southeast1` does **not** serve `gemini-2.5-flash` on
 Vertex → use `us-central1`.
