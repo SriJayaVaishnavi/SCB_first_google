@@ -14,23 +14,30 @@ load_dotenv(override=True)
 
 DATA_DIR = Path(__file__).parent / "data"
 
-# ── Two backend modes, selected by GOOGLE_GENAI_USE_VERTEXAI in backend/.env ──────────
-#   MODE = "vertex"   (GOOGLE_GENAI_USE_VERTEXAI=true)  → Gemini on Vertex AI.
-#                      Needs GOOGLE_CLOUD_PROJECT + GOOGLE_CLOUD_LOCATION and a credential
-#                      (GOOGLE_APPLICATION_CREDENTIALS = the beacon-vertex SA key).
-#   MODE = "aistudio" (GOOGLE_GENAI_USE_VERTEXAI=false) → Gemini Developer API (AI Studio).
-#                      Needs GOOGLE_API_KEY (or GEMINI_API_KEY). No project/SA needed.
-# Flip the one flag in .env to switch — both code paths stay live (nothing commented out).
-# Today: aistudio (Vertex per-day quota drained). Tomorrow: flip back to vertex.
+# ── Backend modes, selected in backend/.env (all code paths stay live, nothing removed) ─
+#   MODE = "vertex"   (GOOGLE_GENAI_USE_VERTEXAI=true)  → Gemini on Vertex AI. Needs
+#                      GOOGLE_CLOUD_PROJECT + GOOGLE_CLOUD_LOCATION + GOOGLE_APPLICATION_
+#                      CREDENTIALS (beacon SA key). The final MFA pitch ("agents in GCP").
+#   MODE = "aistudio" (GOOGLE_GENAI_USE_VERTEXAI=false) → Gemini Developer API. Needs
+#                      GOOGLE_API_KEY. No project/SA.
+#   MODE = "groq"     (BEACON_MODE=groq) → open model (Llama) via Groq + LiteLLM. Needs
+#                      GROQ_API_KEY. TEMPORARY DEV backend only — off-GCP, fast/generous
+#                      free tier; NOT for the Vertex pitch. Lets us build while Gemini is
+#                      throttled. `pip install litellm` required.
+# BEACON_MODE (if set) wins; otherwise the Vertex flag picks vertex|aistudio.
 USE_VERTEXAI = os.getenv("GOOGLE_GENAI_USE_VERTEXAI", "true").lower() == "true"
-MODE = "vertex" if USE_VERTEXAI else "aistudio"
+MODE = os.getenv("BEACON_MODE", "").strip().lower() or ("vertex" if USE_VERTEXAI else "aistudio")
 
-# Vertex-mode settings (ignored in aistudio mode).
+# Vertex-mode settings (ignored otherwise).
 PROJECT = os.getenv("GOOGLE_CLOUD_PROJECT", "")
 LOCATION = os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1")
 
-# AI-Studio-mode setting (ignored in vertex mode). The genai SDK reads either name.
+# AI-Studio-mode setting (ignored otherwise). The genai SDK reads either name.
 API_KEY = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY", "")
+
+# Groq-mode settings (ignored otherwise). LiteLLM reads GROQ_API_KEY from the env.
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+GROQ_MODEL = os.getenv("GROQ_MODEL", "groq/llama-3.3-70b-versatile")
 
 TRIAGE_MODEL = os.getenv("TRIAGE_MODEL", "gemini-2.5-flash")
 # Lower floor => fewer automatic tier bumps (the prompt already handles genuine

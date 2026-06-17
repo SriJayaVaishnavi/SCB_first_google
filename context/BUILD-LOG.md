@@ -29,6 +29,8 @@ Times are local (Asia/Kolkata, the dev machine). Commit hashes link to the repo
 
 | 15:3x | AI Studio mode, full swarm (`2618226`) | mode flipped to AISTUDIO ✓, but `429` then a `503 UNAVAILABLE` crashed the run | (a) AI Studio free tier ≈10 req/min → the ~14-call burst trips it; (b) **bug**: retry only caught 429, so the transient **503** propagated and killed the run; (c) swarm was call-heavy (Intake called the LLM even for English) | retry now covers **503/UNAVAILABLE** too (transient → backoff; distinct from QuotaExhausted); **Intake skips the LLM for English** (ASCII pass-through) cutting ~4 calls; pace with `CALL_INTERVAL_SEC=7` in `.env` to stay under the per-minute cap |
 
+| 15:4x | Add Groq dev backend | AI Studio also throttled (429+503 on `gemini-2.5-flash`) | both Gemini surfaces (Vertex daily cap, AI Studio free-tier RPM + model overload) are unreliable today | add **3rd mode `BEACON_MODE=groq`** via ADK LiteLLM (Llama, off-GCP, fast/generous free tier) — **temporary dev unblock, NOT the Vertex pitch**. Llama lacks Gemini's strict schema, so groq mode drops `output_schema`, injects the JSON shape into the prompt, and parses tolerantly (`_extract_json` strips ```json fences). `pip install litellm` |
+
 > **Correction (15:1x):** earlier rows called the quota "near-zero" — wrong. Phase 3's eval
 > completed ~60 Vertex calls, so the quota is usable. The real story is a **per-DAY cap**: fine
 > in the morning, drained by an afternoon of repeated testing (every 429'd retry is a billable

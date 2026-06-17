@@ -14,14 +14,17 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import time
 
 from google.adk.agents import LlmAgent
 from google.adk.runners import InMemoryRunner
 from google.genai import types
 
+from pydantic import BaseModel
+
 from app.agents.triage import SYSTEM_INSTRUCTION
-from app.config import MODE, TRIAGE_MODEL
+from app.config import GROQ_MODEL, MODE, TRIAGE_MODEL
 from app.data_loader import load_dataset
 from app.schemas import (
     EscalationDecision,
@@ -33,6 +36,51 @@ from app.schemas import (
 )
 
 APP_NAME = "beacon"
+
+
+def _build_model():
+    """The model object every agent runs on, per MODE.
+
+    Gemini (vertex/aistudio) takes a plain model-id string; ADK routes Vertex vs the
+    Developer API from env. Groq (a temporary off-GCP dev backend) goes through ADK's
+    LiteLLM bridge — imported lazily so litellm is only needed in groq mode.
+    """
+    if MODE == "groq":
+        from google.adk.models.lite_llm import LiteLlm
+
+        return LiteLlm(model=GROQ_MODEL)
+    return TRIAGE_MODEL
+
+
+_MODEL = _build_model()
+# Gemini enforces output_schema natively (controlled generation); Llama-via-LiteLLM does
+# not, so in groq mode we drop output_schema, inject the JSON shape into the prompt, and
+# parse tolerantly (_extract_json). Keeps one agent definition working across all modes.
+_NATIVE_SCHEMA = MODE != "groq"
+
+
+def _schema_hint(model_cls: type[BaseModel]) -> str:
+    """A prompt instruction telling a non-Gemini model exactly what JSON to emit."""
+    fields = ", ".join(
+        f'"{name}": <{(f.annotation.__name__ if hasattr(f.annotation, "__name__") else f.annotation)}>'
+        f"  // {f.description or ''}".rstrip()
+        for name, f in model_cls.model_fields.items()
+    )
+    return (
+        "Respond with ONLY a single JSON object (no markdown fences, no prose) of the form:\n"
+        f"{{{fields}}}"
+    )
+
+
+def _mk_agent(name: str, description: str, instruction: str,
+              schema: type[BaseModel], output_key: str) -> LlmAgent:
+    kwargs = dict(name=name, model=_MODEL, description=description, output_key=output_key)
+    if _NATIVE_SCHEMA:
+        kwargs["instruction"] = instruction
+        kwargs["output_schema"] = schema
+    else:
+        kwargs["instruction"] = instruction + "\n\n" + _schema_hint(schema)
+    return LlmAgent(**kwargs)
 
 # Bake the SOP + country feed into the agent instruction (they're small and static),
 # so each inbound message is just the citizen's text — clean agent semantics.
@@ -46,12 +94,11 @@ TRIAGE_INSTRUCTION = (
     + "\n\nReturn ONLY the structured triage verdict for the message you receive."
 )
 
-triage_agent = LlmAgent(
+triage_agent = _mk_agent(
     name="triage_agent",
-    model=TRIAGE_MODEL,
     description="Scores one consular message's true urgency (P1–P4) using the SOP.",
     instruction=TRIAGE_INSTRUCTION,
-    output_schema=TriageResult,
+    schema=TriageResult,
     output_key="triage_result",
 )
 
@@ -66,12 +113,11 @@ INTAKE_INSTRUCTION = (
     "facts — preserve every detail relevant to urgency (location, injuries, numbers, names).\n\n"
     "Return ONLY the structured intake result."
 )
-intake_agent = LlmAgent(
+intake_agent = _mk_agent(
     name="intake_agent",
-    model=TRIAGE_MODEL,
     description="Normalises and translates one raw inbound message into clean English.",
     instruction=INTAKE_INSTRUCTION,
-    output_schema=IntakeResult,
+    schema=IntakeResult,
     output_key="intake_result",
 )
 
@@ -87,12 +133,11 @@ ESCALATION_INSTRUCTION = (
     + json.dumps(_ds.country_feed)
     + "\n\nReturn ONLY the structured escalation decision."
 )
-escalation_agent = LlmAgent(
+escalation_agent = _mk_agent(
     name="escalation_agent",
-    model=TRIAGE_MODEL,
     description="Routes an urgent case to a mission with a concrete suggested action.",
     instruction=ESCALATION_INSTRUCTION,
-    output_schema=EscalationDecision,
+    schema=EscalationDecision,
     output_key="escalation_decision",
 )
 
@@ -108,12 +153,11 @@ RESPONDER_INSTRUCTION = (
     + json.dumps(_ds.country_feed)
     + "\n\nReturn ONLY the structured draft reply."
 )
-responder_agent = LlmAgent(
+responder_agent = _mk_agent(
     name="responder_agent",
-    model=TRIAGE_MODEL,
     description="Drafts a safe, human-confirmed reply for routine queries.",
     instruction=RESPONDER_INSTRUCTION,
-    output_schema=ResponderDraft,
+    schema=ResponderDraft,
     output_key="responder_draft",
 )
 
@@ -240,6 +284,21 @@ def _responder_prompt(text: str, triage: TriageResult) -> str:
     return f'Routine query (category {triage.category}):\n"""{text}"""'
 
 
+def _extract_json(raw: str) -> str:
+    """Pull the JSON object out of a model reply. Gemini returns clean JSON, but Llama
+    (groq) may wrap it in ```json fences or stray prose — strip those before validating."""
+    s = raw.strip()
+    if s.startswith("```"):
+        s = re.sub(r"^```(?:json)?\s*", "", s)
+        s = re.sub(r"\s*```$", "", s).strip()
+    i, j = s.find("{"), s.rfind("}")
+    return s[i:j + 1] if i != -1 and j > i else s
+
+
+def _parse(model_cls, raw: str):
+    return model_cls.model_validate_json(_extract_json(raw))
+
+
 # Async agent calls (the swarm's building blocks).
 async def _intake(text: str) -> IntakeResult:
     # Translation is the only thing Intake adds, so skip the LLM for already-English text:
@@ -247,21 +306,21 @@ async def _intake(text: str) -> IntakeResult:
     # Saves one call per English message — most of the surge — without losing the step.
     if text.isascii():
         return IntakeResult(normalized_text=text.strip(), language="en", translated=False)
-    return IntakeResult.model_validate_json(await _run_async(intake_agent, text))
+    return _parse(IntakeResult, await _run_async(intake_agent, text))
 
 
 async def _triage(text: str) -> TriageResult:
-    return TriageResult.model_validate_json(await _run_async(triage_agent, text))
+    return _parse(TriageResult, await _run_async(triage_agent, text))
 
 
 async def _escalation(text: str, triage: TriageResult) -> EscalationDecision:
     raw = await _run_async(escalation_agent, _escalation_prompt(text, triage))
-    return EscalationDecision.model_validate_json(raw)
+    return _parse(EscalationDecision, raw)
 
 
 async def _responder(text: str, triage: TriageResult) -> ResponderDraft:
     raw = await _run_async(responder_agent, _responder_prompt(text, triage))
-    return ResponderDraft.model_validate_json(raw)
+    return _parse(ResponderDraft, raw)
 
 
 # Sync one-shot wrappers (smoke test / external callers running outside a loop).
