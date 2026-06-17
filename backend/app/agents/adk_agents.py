@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import time
 
 from google.adk.agents import LlmAgent
 from google.adk.runners import InMemoryRunner
@@ -145,27 +146,64 @@ def _count_call(agent_name: str) -> None:
     _api_calls["by_agent"][agent_name] = _api_calls["by_agent"].get(agent_name, 0) + 1
 
 
-async def _run_async(agent: LlmAgent, text: str, *, max_retries: int = 6) -> str:
-    """Invoke an ADK agent with exponential backoff on Vertex 429s.
+# Workflow-tunable knobs, read from backend/.env (no terminal export needed):
+#   CALL_INTERVAL_SEC — min gap between API calls; paces a tight per-MINUTE quota so the
+#                       swarm grinds through like the patient Phase-3 eval did.
+#   MAX_RETRIES       — backoff attempts per call; set low (e.g. 2) when a per-DAY cap is
+#                       drained so we stop wasting requests on doomed retries.
+_CALL_INTERVAL = float(os.getenv("CALL_INTERVAL_SEC", "0"))
+_MAX_RETRIES = int(os.getenv("MAX_RETRIES", "6"))
+_last_call = {"t": 0.0}
 
-    ADK does its own brief retries then raises; new-project Gemini quota is low, so we
-    back off and retry here (mirrors the direct-genai path's _generate_with_backoff).
-    Async so the whole swarm shares one event loop (per-call asyncio.run() left the
-    genai HTTP client's cleanup orphaned → "Event loop is closed" noise, and would
-    break the async FastAPI handlers in Phase 5).
+
+class QuotaExhausted(RuntimeError):
+    """A Vertex 429 that survived full backoff — points to a per-DAY cap, not per-minute."""
+
+
+async def _throttle() -> None:
+    """Enforce CALL_INTERVAL between API calls (process-wide, single-loop)."""
+    if _CALL_INTERVAL <= 0:
+        return
+    wait = _CALL_INTERVAL - (time.monotonic() - _last_call["t"])
+    if wait > 0:
+        await asyncio.sleep(wait)
+    _last_call["t"] = time.monotonic()
+
+
+async def _run_async(agent: LlmAgent, text: str, *, max_retries: int | None = None) -> str:
+    """Invoke an ADK agent with pacing + exponential backoff on Vertex 429s.
+
+    Mirrors the direct-genai eval path's resilience. Async so the whole swarm shares one
+    event loop (per-call asyncio.run() orphaned the genai HTTP client cleanup → "Event
+    loop is closed" noise, and would break the async FastAPI handlers in Phase 5).
+
+    On a 429 we back off (4→60s). If it survives every retry, we raise QuotaExhausted:
+    a per-minute limit would have reset inside that window, so a hard failure means the
+    per-DAY cap is drained — the caller stops the run fast instead of grinding on.
     """
+    retries = max_retries if max_retries is not None else _MAX_RETRIES
     delay = 4.0
-    for attempt in range(max_retries):
+    for attempt in range(retries):
+        await _throttle()
         try:
             _count_call(agent.name)
             return await _invoke(agent, text)
         except Exception as exc:  # noqa: BLE001 — narrowed via _is_rate_limit below
-            if _is_rate_limit(exc) and attempt < max_retries - 1:
-                print(f"    [429 rate-limited on {agent.name}; retrying in {delay:.0f}s…]")
+            if not _is_rate_limit(exc):
+                raise
+            if attempt < retries - 1:
+                print(f"    [429 on {agent.name}; retry in {delay:.0f}s "
+                      f"({attempt + 1}/{retries})]")
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, 60)
                 continue
-            raise
+            raise QuotaExhausted(
+                f"{agent.name}: 429 survived {retries} retries (~120s of backoff). "
+                "Per-minute quota would reset within that window, so this is most likely "
+                "a per-DAY Vertex cap drained by today's runs. Check Console → Quotas; it "
+                "resets ~midnight US-Pacific, or request a bump. (Tune MAX_RETRIES / "
+                "CALL_INTERVAL_SEC in .env.)"
+            ) from exc
     raise RuntimeError("unreachable")  # pragma: no cover
 
 
@@ -354,18 +392,21 @@ def _swarm_demo(batch_size: int | None = None) -> None:
 
     try:
         queue = run_swarm(batch, pace_sec=pace)
+    except QuotaExhausted as exc:
+        print(f"\n[!] Stopped after {_api_calls['total']} API calls — {exc}")
+        print(f"    API calls by agent: {_api_calls['by_agent']}")
+        print("    To stay on Vertex: wait for the daily reset or bump the quota. To grind")
+        print("    through a per-minute limit, pace calls via .env, e.g. CALL_INTERVAL_SEC=7.")
+        return
     except Exception as exc:  # noqa: BLE001
         if _is_rate_limit(exc):
-            print(f"\n[!] Vertex quota (429) exhausted after {_api_calls['total']} API calls.")
-            print("    The swarm logic is fine — this is a quota wall. Options:")
-            print("    • request a gemini-2.5-flash quota bump in us-central1, or")
-            print("    • retry smaller/paced: DEMO_BATCH_SIZE=2 DEMO_PACE_SEC=20 python -m app.agents.adk_agents")
+            print(f"\n[!] Vertex 429 after {_api_calls['total']} API calls: {exc}")
             print(f"    API calls by agent: {_api_calls['by_agent']}")
             return
         raise
 
     _print_queue(queue)
-    print(f"Swarm demo OK — Intake→Triage→Escalation/Responder, ranked queue + trace.")
+    print("Swarm demo OK — Intake→Triage→Escalation/Responder, ranked queue + trace.")
     print(f"API calls made: {_api_calls['total']} (by agent: {_api_calls['by_agent']})")
 
 

@@ -24,7 +24,14 @@ Times are local (Asia/Kolkata, the dev machine). Commit hashes link to the repo
 | ~14:20 | Full swarm built (`d60d4db`) | Intake/Escalation/Responder + `run_swarm()` + 5-msg demo | — | — |
 | 14:30 | Run swarm demo | `429 RESOURCE_EXHAUSTED` on the first Intake call | the ADK rebuild **lost the backoff** the direct-genai path had; ADK's own retries gave up; the swarm fires ~2–3 calls/msg and burst-tripped the low new-project Vertex quota | add `_run()` backoff wrapper (4→60s, 6 retries) around every ADK invoke (`triage/intake/escalation/responder`) — mirrors `triage.py`'s `_generate_with_backoff` |
 | 14:36 | Re-run swarm demo (`8fc7442`) | backoff **works** (Intake+Triage of msg 1 passed) but Escalation kept 429ing → user Ctrl-C'd; also `Task exception … Event loop is closed` spam | (a) **quota wall**: gemini-2.5-flash per-minute quota is effectively near-zero, so ~12 sequential calls can't sustain even with backoff; (b) **bug**: per-call `asyncio.run()` opened/closed a new event loop each call, orphaning the genai HTTP client's async cleanup | (b) refactor swarm to one event loop — async `_run_async`/`run_swarm_async`, sync wrappers via single `asyncio.run`; demo now degrades gracefully + `DEMO_BATCH_SIZE`/`DEMO_PACE_SEC`. (a) needs a **Vertex quota bump** (decision pending) |
-| 14:50 | Limp demo `DEMO_BATCH_SIZE=2 DEMO_PACE_SEC=20` (`463b279`) | 5 calls landed (intake×2, triage×2, escalation×1), then Responder **failed all 6 retries over ~120s** → graceful exit. Meter: 11 total calls | **limping disproven** — 120s backoff did NOT recover, so the limit is not per-minute; quota is near-zero / **daily-exhausted** (today's many test runs drained it). Per-call pacing won't help a daily cap | STOP limping. Real fix = **Vertex quota bump** (keeps the GCP/Vertex pitch; needed for the deployed app anyway) or **AI Studio API key** fallback (`GOOGLE_GENAI_USE_VERTEXAI=false` + `GEMINI_API_KEY` in `.env`) to unblock now. Check the actual quota with `gcloud` before deciding |
+| 14:50 | Limp demo `DEMO_BATCH_SIZE=2 DEMO_PACE_SEC=20` (`463b279`) | 5 calls landed (intake×2, triage×2, escalation×1), then Responder **failed all 6 retries over ~120s** → graceful exit. Meter: 11 total calls | 120s backoff did NOT recover → not per-minute. **Corrected analysis (see note):** quota is NOT near-zero — Phase-3 eval did ~60 calls fine; this is a **per-DAY cap drained** by today's repeated runs | harden the swarm (below) + Console quota check; stay on Vertex |
+| 15:1x | Hardening (`<this commit>`) | n/a (code) | **Why Phase 3 worked, Phase 4 didn't**: same SA/model/region/backoff. Eval ran AM on a fresh daily budget and ground 60 calls through patiently; by PM we'd fired 100+ requests (eval + smokes + ~4 swarm attempts, **failed retries count as requests**) → daily cap hit. Not a code regression | add per-call pacing (`CALL_INTERVAL_SEC`), tunable `MAX_RETRIES`, and a `QuotaExhausted` exception (429 surviving full backoff ⇒ per-day cap ⇒ stop fast, don't burn retries). Knobs live in `.env` (no export) |
+
+> **Correction (15:1x):** earlier rows called the quota "near-zero" — wrong. Phase 3's eval
+> completed ~60 Vertex calls, so the quota is usable. The real story is a **per-DAY cap**: fine
+> in the morning, drained by an afternoon of repeated testing (every 429'd retry is a billable
+> request). Generic lesson for the GCP catalog below: **failed retries consume quota too** — under
+> a daily cap, fewer retries + pacing beats blind backoff.
 
 **Region note (locked earlier):** `asia-southeast1` does **not** serve `gemini-2.5-flash` on
 Vertex → use `us-central1`.
@@ -51,7 +58,12 @@ pre-emptive fix. Use this as a checklist before each new prototype.
    your model (e.g. `us-central1` for `gemini-2.5-flash`) before debugging "permission/exist" 403s.
 
 4. **Quota / rate limits.** New projects hit `429` fast. Add **retry-with-backoff** and keep
-   **concurrency low** until a quota bump.
+   **concurrency low** until a quota bump. Know your cap type: a **per-minute** limit resets in
+   ~60s (backoff/pacing wins) but a **per-DAY** cap does not (backoff just burns more quota —
+   **every 429'd retry is a billable request**). If a 429 survives ~120s of backoff, treat it as
+   a daily cap: stop fast (low MAX_RETRIES), pace calls under the per-minute rate, and wait for
+   the reset (~midnight US-Pacific) or bump the quota. Gemini 2.5 also uses dynamic shared quota,
+   so fresh projects with no usage history get the smallest slice.
 
 5. **Repo & interpreter sync (Cloud Shell loop).** `git pull` before every run; install deps
    into the **same** interpreter you invoke (`python -m pip`, watch `/usr/bin/python` vs others).
