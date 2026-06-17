@@ -33,6 +33,8 @@ Times are local (Asia/Kolkata, the dev machine). Commit hashes link to the repo
 
 | 16:xx | Phase 5 build (`a96dad1`, `935cdb4`) | clean — backend FastAPI SSE + Next.js dashboard; frontend `tsc`+`next build` pass | `next@14.2.5` flagged a security advisory on install | bump to `next@^14.2.35` (patched); rebuild clean. Backend mode-agnostic (runs on the active `.env` mode). Pending: run both together against a live LLM (Groq) |
 
+| 17:1x | Run dashboard in Cloud Shell | `ERR_CONNECTION_REFUSED` on `localhost:8000`; 8000 Web Preview blocked ("Unsafe attempt to load URL … must match") | browser on the 3000 Web Preview can't reach `localhost:8000` (that's the user's laptop), and the 8000 preview is an **auth-walled cross-origin** | add a Next `rewrites` **same-origin `/beacon` proxy** (`ff5605a`) — browser → 3000 origin, Next forwards to `localhost:8000` server-side. Client base defaults to `/beacon` unless `NEXT_PUBLIC_API_URL` set. Must `rm .env.local` + **restart `npm run dev`** (NEXT_PUBLIC_* baked at start) — still showing `localhost:8000` = old var/cached bundle |
+
 > **Correction (15:1x):** earlier rows called the quota "near-zero" — wrong. Phase 3's eval
 > completed ~60 Vertex calls, so the quota is usable. The real story is a **per-DAY cap**: fine
 > in the morning, drained by an afternoon of repeated testing (every 429'd retry is a billable
@@ -90,3 +92,10 @@ pre-emptive fix. Use this as a checklist before each new prototype.
 7. **Workflow shape that worked here.** Claude (Windows) writes → commits → pushes; user pulls
    in **Cloud Shell** (where the SA + Vertex auth work) and runs. Windows lacks `gcloud`, so all
    Vertex calls happen in Cloud Shell.
+
+8. **Local dev networking in Cloud Shell.** A browser on a `*-cloudshell.dev` Web Preview cannot
+   reach `localhost:8000` (that's the *user's laptop*), and a second-port Web Preview is an
+   auth-walled cross-origin (XHR → login redirect → CORS fail). Fix: have the frontend dev server
+   **proxy** API calls same-origin (Next `rewrites` → `localhost:8000` server-side) so the browser
+   only ever talks to one origin. Remember `NEXT_PUBLIC_*` is inlined at build/dev-start — changing
+   it needs a dev-server restart + a hard browser refresh, and a stale `.env.local` silently wins.

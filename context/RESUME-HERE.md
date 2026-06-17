@@ -7,28 +7,30 @@ say "resume Beacon — read context/RESUME-HERE.md", and run the ▶️ NEXT STE
 
 ---
 
-## ⏭️ NEXT STEP
-✅ **ADK smoke test PASSED** (2026-06-17 14:08, commit `e339a6c`): ADK v1.27.2, Vertex returned
-`[P1]` for the trapped-child message and `[P4]` for the flight-status one — "ADK smoke test OK".
-The ADK `LlmAgent` works end-to-end on Vertex in this environment. (Auth fixes that got here are
-logged in `context/BUILD-LOG.md`.)
+## ⏭️ NEXT STEP — saved 2026-06-17 17:26 (latest commit `ff5605a`)
 
-**Full swarm BUILT** (Intake → Triage → Escalation/Responder + `run_swarm` → danger-ranked queue +
-handoff trace; Intake skips the LLM for English, calls it only to translate). Hardened for flaky
-quota: async single-loop, pacing (`CALL_INTERVAL_SEC`), tunable `MAX_RETRIES`, retries 429 **and**
-503, `QuotaExhausted` for a drained daily cap, live API-call meter. **Three backend modes** (see
-below) — **running on GROQ now** while Gemini is throttled.
+**Where we are:** Phases 1–5 BUILT, Phase 6 (Cloud Run) scaffolded. Currently **bringing up the
+full stack locally in Cloud Shell on GROQ mode** (Gemini throttled today). Backend + dashboard
+both built and compiling. The one OPEN item is a Cloud Shell wiring fix (below).
 
-**⏭️ Immediate:** confirm the swarm completes end-to-end on Groq (`python -m app.agents.adk_agents`,
-first line should say `mode: GROQ`). Then **Phase 5** — FastAPI `/simulate` SSE + Next.js dashboard.
-Tomorrow: flip back to **vertex** mode once the daily quota resets/bumps and re-run the eval gate.
+**🔧 OPEN — finish the local run (Cloud Shell):**
+1. Backend (terminal 1): `cd ~/SCB_first_google/backend && uvicorn app.api:app --host 0.0.0.0 --port 8000`
+   — verify `curl localhost:8000/` → `{"status":"ok","mode":"groq",...}`.
+2. Dashboard (terminal 2): the browser must NOT call `localhost:8000` directly (in Cloud Shell that's
+   the user's laptop → ERR_CONNECTION_REFUSED; the 8000 Web Preview is auth-walled cross-origin).
+   Fix = the same-origin `/beacon` proxy (Next `rewrites` in `next.config.mjs`, commit `ff5605a`):
+   - **`rm -f frontend/.env.local`** (any `NEXT_PUBLIC_API_URL` there forces the broken direct call),
+   - **restart `npm run dev`** (NEXT_PUBLIC_* is read only at dev-server start), hard-refresh browser.
+   - Network calls should then hit `/beacon/*` (same origin), not `localhost:8000`.
+3. Open the **port-3000 Web Preview**, click **▶ Simulate surge** → live ranked queue, P1 at top.
+   (Was still showing `localhost:8000` last run — means `.env.local` not removed or dev server not
+   restarted. That's the thing to confirm next session.)
 
-To run the swarm (no exports — config comes from `backend/.env`):
-```bash
-cd ~/SCB_first_google && git pull && cd backend
-pip install -r requirements.txt --quiet      # google-adk
-python -m app.agents.adk_agents
-```
+**Then:** Phase 6 deploy on Vertex (user's pick) per `DEPLOY.md`, after (a) this local run is
+verified and (b) the Vertex per-day quota is bumped/reset. Tomorrow: flip `.env` back to vertex mode.
+
+To re-run the swarm CLI directly (no dashboard): `cd backend && python -m app.agents.adk_agents`
+(first line shows the active mode; config from `backend/.env`, no exports).
 
 ---
 
