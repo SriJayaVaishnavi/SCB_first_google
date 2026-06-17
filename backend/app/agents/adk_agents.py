@@ -133,9 +133,20 @@ async def _invoke(agent: LlmAgent, text: str) -> str:
 
 
 def _is_rate_limit(exc: Exception) -> bool:
-    """True for Vertex 429s — surfaced either as genai ClientError or ADK's wrapper."""
+    """True for 429s — surfaced either as genai ClientError or ADK's wrapper."""
     blob = f"{type(exc).__name__}: {exc}"
     return "429" in blob or "RESOURCE_EXHAUSTED" in blob or "ResourceExhausted" in blob
+
+
+def _is_overloaded(exc: Exception) -> bool:
+    """True for transient backend overload (503 UNAVAILABLE / 'high demand') — retry it."""
+    blob = f"{type(exc).__name__}: {exc}"
+    return "503" in blob or "UNAVAILABLE" in blob or "high demand" in blob or "overloaded" in blob
+
+
+def _is_retryable(exc: Exception) -> bool:
+    """Retry both rate-limits (429) and transient overload (503)."""
+    return _is_rate_limit(exc) or _is_overloaded(exc)
 
 
 # Live API-call meter — every _invoke attempt (incl. retries) hits Vertex once and burns
@@ -190,21 +201,27 @@ async def _run_async(agent: LlmAgent, text: str, *, max_retries: int | None = No
         try:
             _count_call(agent.name)
             return await _invoke(agent, text)
-        except Exception as exc:  # noqa: BLE001 — narrowed via _is_rate_limit below
-            if not _is_rate_limit(exc):
+        except Exception as exc:  # noqa: BLE001 — narrowed via _is_retryable below
+            if not _is_retryable(exc):
                 raise
             if attempt < retries - 1:
-                print(f"    [429 on {agent.name}; retry in {delay:.0f}s "
+                kind = "429 quota" if _is_rate_limit(exc) else "503 overloaded"
+                print(f"    [{kind} on {agent.name}; retry in {delay:.0f}s "
                       f"({attempt + 1}/{retries})]")
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, 60)
                 continue
-            raise QuotaExhausted(
-                f"{agent.name}: 429 survived {retries} retries (~120s of backoff). "
-                "Per-minute quota would reset within that window, so this is most likely "
-                "a per-DAY Vertex cap drained by today's runs. Check Console → Quotas; it "
-                "resets ~midnight US-Pacific, or request a bump. (Tune MAX_RETRIES / "
-                "CALL_INTERVAL_SEC in .env.)"
+            if _is_rate_limit(exc):
+                raise QuotaExhausted(
+                    f"{agent.name}: 429 survived {retries} retries (~120s of backoff). "
+                    "Per-minute quota would reset within that window, so this is most likely "
+                    "a per-DAY cap drained by today's runs. Check Console → Quotas; it "
+                    "resets ~midnight US-Pacific, or request a bump. (Tune MAX_RETRIES / "
+                    "CALL_INTERVAL_SEC in .env.)"
+                ) from exc
+            raise RuntimeError(
+                f"{agent.name}: backend overloaded (503) after {retries} retries — the model "
+                "is busy (transient). Wait a minute and rerun; pacing via CALL_INTERVAL_SEC helps."
             ) from exc
     raise RuntimeError("unreachable")  # pragma: no cover
 
@@ -225,6 +242,11 @@ def _responder_prompt(text: str, triage: TriageResult) -> str:
 
 # Async agent calls (the swarm's building blocks).
 async def _intake(text: str) -> IntakeResult:
+    # Translation is the only thing Intake adds, so skip the LLM for already-English text:
+    # plain-ASCII ⇒ English/Latin (no call); non-ASCII (Thai/Tamil/Arabic/…) ⇒ translate.
+    # Saves one call per English message — most of the surge — without losing the step.
+    if text.isascii():
+        return IntakeResult(normalized_text=text.strip(), language="en", translated=False)
     return IntakeResult.model_validate_json(await _run_async(intake_agent, text))
 
 
@@ -387,9 +409,14 @@ def _swarm_demo(batch_size: int | None = None) -> None:
         batch_size = int(os.getenv("DEMO_BATCH_SIZE", str(len(batch))))
     batch = batch[:batch_size]
     pace = float(os.getenv("DEMO_PACE_SEC", "0"))
-    # Call budget so we know the cost before we spend it: 2 calls/msg (Intake+Triage)
-    # + 1 for the P1/P2/P4 handoff (P3 has none). Retries add to the live meter.
-    est = sum(2 + (0 if m.get("true_label") == "P3" else 1) for m in batch)
+    # Call budget so we know the cost before we spend it: Triage (1) + a handoff (1, none
+    # for P3) + Intake only for non-English text (English is a free local pass-through).
+    est = sum(
+        1
+        + (0 if m.get("true_label") == "P3" else 1)
+        + (0 if m.get("text", "").isascii() else 1)
+        for m in batch
+    )
     print(f"Running the Beacon swarm over {len(batch)} sample messages "
           f"(pace {pace:.0f}s). Estimated API calls (no retries): ~{est}…")
 
@@ -402,8 +429,8 @@ def _swarm_demo(batch_size: int | None = None) -> None:
         print("    through a per-minute limit, pace calls via .env, e.g. CALL_INTERVAL_SEC=7.")
         return
     except Exception as exc:  # noqa: BLE001
-        if _is_rate_limit(exc):
-            print(f"\n[!] Vertex 429 after {_api_calls['total']} API calls: {exc}")
+        if _is_retryable(exc):
+            print(f"\n[!] Stopped after {_api_calls['total']} API calls: {exc}")
             print(f"    API calls by agent: {_api_calls['by_agent']}")
             return
         raise
