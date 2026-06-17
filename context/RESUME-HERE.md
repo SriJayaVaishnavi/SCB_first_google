@@ -7,30 +7,27 @@ say "resume Beacon — read context/RESUME-HERE.md", and run the ▶️ NEXT STE
 
 ---
 
-## ⏭️ NEXT STEP — saved 2026-06-17 17:26 (latest commit `ff5605a`)
+## ⏭️ NEXT STEP — saved 2026-06-17 17:30 (latest commit `89d4630`)
 
-**Where we are:** Phases 1–5 BUILT, Phase 6 (Cloud Run) scaffolded. Currently **bringing up the
-full stack locally in Cloud Shell on GROQ mode** (Gemini throttled today). Backend + dashboard
-both built and compiling. The one OPEN item is a Cloud Shell wiring fix (below).
+**Where we are:** Phases 1–5 BUILT and **local run VERIFIED** (full stack in Cloud Shell on GROQ:
+backend `uvicorn app.api:app`, dashboard via the same-origin `/beacon` proxy, Simulate surge works).
+Phase 6 (Cloud Run) scaffolded **+ one-shot `deploy.sh`**. **Deploy is deferred to TOMORROW on
+Vertex** (the MFA pitch) — Vertex per-day quota should be reset by morning.
 
-**🔧 OPEN — finish the local run (Cloud Shell):**
-1. Backend (terminal 1): `cd ~/SCB_first_google/backend && uvicorn app.api:app --host 0.0.0.0 --port 8000`
-   — verify `curl localhost:8000/` → `{"status":"ok","mode":"groq",...}`.
-2. Dashboard (terminal 2): the browser must NOT call `localhost:8000` directly (in Cloud Shell that's
-   the user's laptop → ERR_CONNECTION_REFUSED; the 8000 Web Preview is auth-walled cross-origin).
-   Fix = the same-origin `/beacon` proxy (Next `rewrites` in `next.config.mjs`, commit `ff5605a`):
-   - **`rm -f frontend/.env.local`** (any `NEXT_PUBLIC_API_URL` there forces the broken direct call),
-   - **restart `npm run dev`** (NEXT_PUBLIC_* is read only at dev-server start), hard-refresh browser.
-   - Network calls should then hit `/beacon/*` (same origin), not `localhost:8000`.
-3. Open the **port-3000 Web Preview**, click **▶ Simulate surge** → live ranked queue, P1 at top.
-   (Was still showing `localhost:8000` last run — means `.env.local` not removed or dev server not
-   restarted. That's the thing to confirm next session.)
+**🚀 TOMORROW — deploy (one command, Cloud Shell, from repo root):**
+```bash
+cd ~/SCB_first_google && git pull
+bash deploy.sh vertex        # enables APIs, deploys beacon-api (Vertex via runtime SA +
+                             # roles/aiplatform.user), builds+deploys beacon-web, prints both URLs
+```
+Prereq: confirm the **Vertex `generate_content` per-day quota** has reset/bumped (else live 429) —
+quick check `bash backend/run_eval.sh` or the swarm CLI in vertex mode. If Vertex still throttled,
+`bash deploy.sh groq` deploys a working demo immediately (reads GROQ_API_KEY from `backend/.env`);
+switch later by re-running `bash deploy.sh vertex`. Full runbook: `DEPLOY.md`.
 
-**Then:** Phase 6 deploy on Vertex (user's pick) per `DEPLOY.md`, after (a) this local run is
-verified and (b) the Vertex per-day quota is bumped/reset. Tomorrow: flip `.env` back to vertex mode.
-
-To re-run the swarm CLI directly (no dashboard): `cd backend && python -m app.agents.adk_agents`
-(first line shows the active mode; config from `backend/.env`, no exports).
+Local dev recap (if needed again): backend `uvicorn app.api:app --host 0.0.0.0 --port 8000`;
+dashboard `npm run dev` with **no `.env.local`** so it uses the `/beacon` proxy; open port-3000
+Web Preview. Swarm CLI: `cd backend && python -m app.agents.adk_agents` (first line shows mode).
 
 ---
 
