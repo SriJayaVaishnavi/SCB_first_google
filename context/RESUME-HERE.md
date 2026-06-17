@@ -1,26 +1,28 @@
 # 🔖 RESUME HERE — Beacon Crisis Triage Agent Swarm
 
-**Last updated:** 2026-06-17 (session paused mid-Phase-4). Read this first to resume.
+**Last updated:** 2026-06-17 14:08 (Phase-4 ADK smoke test PASSED). Read this first to resume.
+**Timestamped error/fix ledger + generic GCP workflow:** see `context/BUILD-LOG.md`.
 **To restart a session:** open Claude Code in `C:\Users\SrijayavaishnaviS\beacon-crisis-triage`,
 say "resume Beacon — read context/RESUME-HERE.md", and run the ▶️ NEXT STEP below.
 
 ---
 
-## ⏭️ NEXT STEP (the one thing not yet executed)
-The ADK smoke test was written + pushed (commit `dc32a84`) but **NOT run yet**. In Cloud Shell:
+## ⏭️ NEXT STEP
+✅ **ADK smoke test PASSED** (2026-06-17 14:08, commit `e339a6c`): ADK v1.27.2, Vertex returned
+`[P1]` for the trapped-child message and `[P4]` for the flight-status one — "ADK smoke test OK".
+The ADK `LlmAgent` works end-to-end on Vertex in this environment. (Auth fixes that got here are
+logged in `context/BUILD-LOG.md`.)
 
+**Now building the full swarm (Phase 4 continuation):** Intake → Triage (done) → Escalation →
+Responder as ADK agents + `run_swarm(messages) -> ranked queue + handoff trace`, tested on a
+small batch first. After that → Phase 5 (FastAPI `/simulate` SSE + Next.js dashboard).
+
+To re-run the smoke test any time (no exports — config comes from `backend/.env`):
 ```bash
 cd ~/SCB_first_google && git pull && cd backend
-pip install -r requirements.txt --quiet          # installs google-adk (new dep)
-export GOOGLE_APPLICATION_CREDENTIALS=~/beacon-sa-key.json
-GOOGLE_GENAI_USE_VERTEXAI=true GOOGLE_CLOUD_PROJECT=rapidbuildsingapore \
-  GOOGLE_CLOUD_LOCATION=us-central1 python -m app.agents.adk_agents
+pip install -r requirements.txt --quiet      # google-adk
+python -m app.agents.adk_agents
 ```
-Expected: ADK version prints, then `[P1]` for the trapped-child message and `[P4]` for the
-flight-status one, then "ADK smoke test OK". Paste that output to Claude.
-- ✅ works → Claude builds the full swarm (Intake→Triage→Escalation→Responder) as ADK agents.
-- ❌ ADK API error → paste the traceback; it's a version quirk (create_session / output_schema /
-  Part.from_text) and gets patched in one shot.
 
 ---
 
@@ -57,8 +59,11 @@ Chosen idea = **Option C: Triage Agent Swarm**. Spec + plan written & committed.
     gcloud projects add-iam-policy-binding rapidbuildsingapore --member="serviceAccount:beacon-vertex@rapidbuildsingapore.iam.gserviceaccount.com" --role="roles/aiplatform.user"
     gcloud iam service-accounts keys create ~/beacon-sa-key.json --iam-account=beacon-vertex@rapidbuildsingapore.iam.gserviceaccount.com
     ```
-- Fallback if Vertex ever blocks: AI Studio API key — `export GOOGLE_GENAI_USE_VERTEXAI=false; export GEMINI_API_KEY=...`.
+- Fallback if Vertex ever blocks: AI Studio API key — set `GOOGLE_GENAI_USE_VERTEXAI=false` and `GEMINI_API_KEY=...` in `.env`.
 - Full auth saga documented in `context/session-2026-06-17-0935-vertex-auth-troubleshooting.md` (local).
+- **NO terminal `export`** (user preference): all config lives in persistent `backend/.env`;
+  `config.py` uses `load_dotenv(override=True)` so it beats any stale shell var. Recreate-`.env`
+  command + the full error ledger are in `context/BUILD-LOG.md`.
 
 ## Workflow
 Claude (Windows) writes code → commits → pushes. User pulls in **Cloud Shell** and runs (Cloud
@@ -73,10 +78,10 @@ all Vertex runs happen in Cloud Shell.
   5.9% (over-escalation); tuned the prompt + lowered confidence floor to 0.5 + added scoreboard
   breakdown (commit `4943a9b`). Per user, NOT chasing precision further — prototype mindset.
   (Optional: re-run `bash run_eval.sh` to see tuned numbers, but not required.)
-- 🔄 **Phase 4** ADK swarm — IN PROGRESS. Triage rebuilt as an ADK `LlmAgent` in
-  `backend/app/agents/adk_agents.py` (+ smoke test). **Smoke test not yet run = the NEXT STEP.**
-  Decision: **use Google ADK** (real agents — matches the "agents in GCP" pitch). After smoke test
-  passes → build Intake, Escalation (ranking), Responder agents + `run_swarm()` with handoff trace.
+- 🔄 **Phase 4** ADK swarm — IN PROGRESS. Triage is an ADK `LlmAgent` in
+  `backend/app/agents/adk_agents.py`; **smoke test PASSED 2026-06-17 14:08** (`e339a6c`).
+  Decision: **use Google ADK** (real agents — matches the "agents in GCP" pitch). NOW building:
+  Intake, Escalation (ranking), Responder agents + `run_swarm()` with handoff trace.
 - ⬜ **Phase 5** FastAPI (`/simulate` SSE) + Next.js dashboard (live queue, case detail, ops
   scoreboard, agent trace). User wants ADK first, THEN dashboard.
 - ⬜ **Phase 6** Dockerize + `gcloud run deploy`.
@@ -93,7 +98,7 @@ all Vertex runs happen in Cloud Shell.
   TRIAGE_MODEL, TRIAGE_CONFIDENCE_FLOOR(0.5), EVAL_WORKERS.
 
 ## Latest commit
-`dc32a84 feat(adk): Phase 4 start — Triage as a Google ADK LlmAgent + smoke test`
+`e339a6c fix(config): load .env with override=True so SA key beats stale shell var`
 
 ## Source docs (user's Desktop)
 `MFA_SG_AI_Immersion_Consolidated_Dossier 2.md`, `MFA-Singapore-AI-Immersion-Day 2.html`,

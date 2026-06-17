@@ -20,14 +20,13 @@ dashboard in seconds — built for MFA Singapore "AI Immersion Day", Card 01 "Th
 
 ## ✅ Done
 - Phase 1 GCP setup · Phase 2 data layer (300 msgs + SOP + feed) · Phase 3 triage eval
-  (**P1 recall 100%**, gate passed). Triage rebuilt as an ADK `LlmAgent` (smoke test pending).
+  (**P1 recall 100%**, gate passed). Triage rebuilt as an ADK `LlmAgent`.
+- **Step A — ADK verified:** smoke test PASSED 2026-06-17 14:08 (`e339a6c`), no terminal exports
+  (config via `backend/.env`). Timestamped error ledger: `context/BUILD-LOG.md`.
 
 ## ⏳ TO DO — to complete & deploy the prototype
 
-### Step A — verify ADK (NEXT, ~5 min)  ▶️ in Cloud Shell
-Run the ADK smoke test (see RESUME-HERE.md). Confirms the ADK API works. → then Step B.
-
-### Step B — build the full swarm (Phase 4)
+### Step B — build the full swarm (Phase 4) ◀ NOW
 Build as ADK agents with a visible handoff trace:
 - **Intake** — normalise/translate each message.
 - **Triage** — score P1–P4 + reason + SOP ref (already an ADK agent).
