@@ -13,11 +13,17 @@ say "resume Beacon — read context/RESUME-HERE.md", and run the ▶️ NEXT STE
 The ADK `LlmAgent` works end-to-end on Vertex in this environment. (Auth fixes that got here are
 logged in `context/BUILD-LOG.md`.)
 
-**Now building the full swarm (Phase 4 continuation):** Intake → Triage (done) → Escalation →
-Responder as ADK agents + `run_swarm(messages) -> ranked queue + handoff trace`, tested on a
-small batch first. After that → Phase 5 (FastAPI `/simulate` SSE + Next.js dashboard).
+**Full swarm BUILT** (Intake → Triage → Escalation/Responder + `run_swarm` → danger-ranked queue +
+handoff trace; Intake skips the LLM for English, calls it only to translate). Hardened for flaky
+quota: async single-loop, pacing (`CALL_INTERVAL_SEC`), tunable `MAX_RETRIES`, retries 429 **and**
+503, `QuotaExhausted` for a drained daily cap, live API-call meter. **Three backend modes** (see
+below) — **running on GROQ now** while Gemini is throttled.
 
-To re-run the smoke test any time (no exports — config comes from `backend/.env`):
+**⏭️ Immediate:** confirm the swarm completes end-to-end on Groq (`python -m app.agents.adk_agents`,
+first line should say `mode: GROQ`). Then **Phase 5** — FastAPI `/simulate` SSE + Next.js dashboard.
+Tomorrow: flip back to **vertex** mode once the daily quota resets/bumps and re-run the eval gate.
+
+To run the swarm (no exports — config comes from `backend/.env`):
 ```bash
 cd ~/SCB_first_google && git pull && cd backend
 pip install -r requirements.txt --quiet      # google-adk
@@ -64,10 +70,16 @@ Chosen idea = **Option C: Triage Agent Swarm**. Spec + plan written & committed.
 - **NO terminal `export`** (user preference): all config lives in persistent `backend/.env`;
   `config.py` uses `load_dotenv(override=True)` so it beats any stale shell var. Recreate-`.env`
   command + the full error ledger are in `context/BUILD-LOG.md`.
-- **TWO MODES** (one `.env` flag, both code paths live — nothing commented out):
-  `GOOGLE_GENAI_USE_VERTEXAI=false` → **AI Studio** (Gemini Developer API, needs `GOOGLE_API_KEY`)
-  — ACTIVE NOW because the Vertex per-day quota is drained. Flip to `true` → **Vertex** (needs
-  project/location + the beacon SA key) — the plan for tomorrow. See `app/config.py` (`MODE`).
+- **THREE MODES** (config-selected in `.env`, all code paths live — nothing commented out; see
+  `app/config.py` `MODE` + `adk_agents._build_model`):
+  - **vertex** (`GOOGLE_GENAI_USE_VERTEXAI=true`) — Gemini on Vertex AI, beacon SA key. **The MFA
+    pitch.** Blocked today by a drained per-DAY quota; resume tomorrow after reset/bump.
+  - **aistudio** (`GOOGLE_GENAI_USE_VERTEXAI=false` + `GOOGLE_API_KEY`) — Gemini Developer API.
+    Also throttled today (free-tier RPM + `gemini-2.5-flash` 503 overload).
+  - **groq** (`BEACON_MODE=groq` + `GROQ_API_KEY`, needs `pip install litellm`) — open model
+    (Llama) via ADK LiteLLM, off-GCP. **ACTIVE NOW for dev** (fast, generous free tier). Temporary
+    unblock only — NOT for the pitch; Llama may not hit the P1-recall gate. Switch back: delete the
+    `BEACON_MODE` line. The run's first printed line shows the active mode.
 
 ## Workflow
 Claude (Windows) writes code → commits → pushes. User pulls in **Cloud Shell** and runs (Cloud
@@ -82,10 +94,12 @@ all Vertex runs happen in Cloud Shell.
   5.9% (over-escalation); tuned the prompt + lowered confidence floor to 0.5 + added scoreboard
   breakdown (commit `4943a9b`). Per user, NOT chasing precision further — prototype mindset.
   (Optional: re-run `bash run_eval.sh` to see tuned numbers, but not required.)
-- 🔄 **Phase 4** ADK swarm — IN PROGRESS. Triage is an ADK `LlmAgent` in
-  `backend/app/agents/adk_agents.py`; **smoke test PASSED 2026-06-17 14:08** (`e339a6c`).
-  Decision: **use Google ADK** (real agents — matches the "agents in GCP" pitch). NOW building:
-  Intake, Escalation (ranking), Responder agents + `run_swarm()` with handoff trace.
+- 🔄 **Phase 4** ADK swarm — **BUILT**, end-to-end run pending (Gemini quota throttled, so
+  verifying on **Groq** mode now). All 4 ADK agents in `backend/app/agents/adk_agents.py`
+  (Intake→Triage→Escalation/Responder) + `run_swarm()` with ranked queue + handoff trace; smoke
+  test passed on Vertex (14:08). Hardened for flaky quota (pacing, 429+503 retries,
+  `QuotaExhausted`, call meter) + **3 backend modes** (vertex|aistudio|groq). Remaining: confirm a
+  clean full run, then re-run the eval gate on Vertex tomorrow.
 - ⬜ **Phase 5** FastAPI (`/simulate` SSE) + Next.js dashboard (live queue, case detail, ops
   scoreboard, agent trace). User wants ADK first, THEN dashboard.
 - ⬜ **Phase 6** Dockerize + `gcloud run deploy`.
@@ -102,7 +116,8 @@ all Vertex runs happen in Cloud Shell.
   TRIAGE_MODEL, TRIAGE_CONFIDENCE_FLOOR(0.5), EVAL_WORKERS.
 
 ## Latest commit
-`e339a6c fix(config): load .env with override=True so SA key beats stale shell var`
+`29d22b9 fix(deps): pin websockets <16 so litellm and google-adk coexist` (full swarm + 3 modes +
+quota hardening + Groq dev backend all landed; see `context/BUILD-LOG.md` for the debugging ledger)
 
 ## Source docs (user's Desktop)
 `MFA_SG_AI_Immersion_Consolidated_Dossier 2.md`, `MFA-Singapore-AI-Immersion-Day 2.html`,

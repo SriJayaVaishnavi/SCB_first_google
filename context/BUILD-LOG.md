@@ -26,10 +26,10 @@ Times are local (Asia/Kolkata, the dev machine). Commit hashes link to the repo
 | 14:36 | Re-run swarm demo (`8fc7442`) | backoff **works** (Intake+Triage of msg 1 passed) but Escalation kept 429ing → user Ctrl-C'd; also `Task exception … Event loop is closed` spam | (a) **quota wall**: gemini-2.5-flash per-minute quota is effectively near-zero, so ~12 sequential calls can't sustain even with backoff; (b) **bug**: per-call `asyncio.run()` opened/closed a new event loop each call, orphaning the genai HTTP client's async cleanup | (b) refactor swarm to one event loop — async `_run_async`/`run_swarm_async`, sync wrappers via single `asyncio.run`; demo now degrades gracefully + `DEMO_BATCH_SIZE`/`DEMO_PACE_SEC`. (a) needs a **Vertex quota bump** (decision pending) |
 | 14:50 | Limp demo `DEMO_BATCH_SIZE=2 DEMO_PACE_SEC=20` (`463b279`) | 5 calls landed (intake×2, triage×2, escalation×1), then Responder **failed all 6 retries over ~120s** → graceful exit. Meter: 11 total calls | 120s backoff did NOT recover → not per-minute. **Corrected analysis (see note):** quota is NOT near-zero — Phase-3 eval did ~60 calls fine; this is a **per-DAY cap drained** by today's repeated runs | harden the swarm (below) + Console quota check; stay on Vertex |
 | 15:1x | Hardening (`<this commit>`) | n/a (code) | **Why Phase 3 worked, Phase 4 didn't**: same SA/model/region/backoff. Eval ran AM on a fresh daily budget and ground 60 calls through patiently; by PM we'd fired 100+ requests (eval + smokes + ~4 swarm attempts, **failed retries count as requests**) → daily cap hit. Not a code regression | add per-call pacing (`CALL_INTERVAL_SEC`), tunable `MAX_RETRIES`, and a `QuotaExhausted` exception (429 surviving full backoff ⇒ per-day cap ⇒ stop fast, don't burn retries). Knobs live in `.env` (no export) |
-
-| 15:3x | AI Studio mode, full swarm (`2618226`) | mode flipped to AISTUDIO ✓, but `429` then a `503 UNAVAILABLE` crashed the run | (a) AI Studio free tier ≈10 req/min → the ~14-call burst trips it; (b) **bug**: retry only caught 429, so the transient **503** propagated and killed the run; (c) swarm was call-heavy (Intake called the LLM even for English) | retry now covers **503/UNAVAILABLE** too (transient → backoff; distinct from QuotaExhausted); **Intake skips the LLM for English** (ASCII pass-through) cutting ~4 calls; pace with `CALL_INTERVAL_SEC=7` in `.env` to stay under the per-minute cap |
-
-| 15:4x | Add Groq dev backend | AI Studio also throttled (429+503 on `gemini-2.5-flash`) | both Gemini surfaces (Vertex daily cap, AI Studio free-tier RPM + model overload) are unreliable today | add **3rd mode `BEACON_MODE=groq`** via ADK LiteLLM (Llama, off-GCP, fast/generous free tier) — **temporary dev unblock, NOT the Vertex pitch**. Llama lacks Gemini's strict schema, so groq mode drops `output_schema`, injects the JSON shape into the prompt, and parses tolerantly (`_extract_json` strips ```json fences). `pip install litellm` |
+| 15:3x | AI Studio mode, full swarm (`2618226`) | mode flipped to AISTUDIO ✓, but `429` then a `503 UNAVAILABLE` crashed the run | (a) AI Studio free tier ≈10 req/min → the ~14-call burst trips it; (b) **bug**: retry only caught 429, so the transient **503** propagated and killed the run; (c) swarm was call-heavy (Intake called the LLM even for English) | retry now covers **503/UNAVAILABLE** too (transient → backoff; distinct from QuotaExhausted); **Intake skips the LLM for English** (ASCII pass-through) cutting ~4 calls; pace with `CALL_INTERVAL_SEC=7` in `.env` to stay under the per-minute cap (`1f62e9c`) |
+| 15:4x | Add Groq dev backend (`e629c4e`) | both Gemini surfaces throttled (Vertex daily cap; AI Studio 429+503) | both unreliable today | add **3rd mode `BEACON_MODE=groq`** via ADK LiteLLM (Llama, off-GCP, fast/generous free tier) — **temporary dev unblock, NOT the Vertex pitch**. Llama lacks Gemini's strict schema, so groq mode drops `output_schema`, injects the JSON shape into the prompt, and parses tolerantly (`_extract_json` strips ```json fences). `pip install litellm` |
+| 16:2x | `pip install litellm` | `dependency conflict: google-adk requires websockets<16.0.0 but you have websockets 16.0` | litellm pulled websockets 16.0, outside ADK's pinned range | pin `websockets>=15.0.1,<16.0.0` in requirements + install it (`29d22b9`); litellm works on <16 |
+| 16:3x | Write Groq `.env` (heredoc/printf) | `bash: GROQ_MODEL=…: No such file or directory`; only BEACON_MODE + GROQ_API_KEY landed | a **trailing space after the `\`** broke printf's line continuation, so the next line ran as a command | harmless — `GROQ_MODEL` defaults in config; add it cleanly with `echo '…' >> .env` if wanted. (Lesson → shell gotchas) |
 
 > **Correction (15:1x):** earlier rows called the quota "near-zero" — wrong. Phase 3's eval
 > completed ~60 Vertex calls, so the quota is usable. The real story is a **per-DAY cap**: fine
@@ -67,13 +67,23 @@ pre-emptive fix. Use this as a checklist before each new prototype.
    **every 429'd retry is a billable request**). If a 429 survives ~120s of backoff, treat it as
    a daily cap: stop fast (low MAX_RETRIES), pace calls under the per-minute rate, and wait for
    the reset (~midnight US-Pacific) or bump the quota. Gemini 2.5 also uses dynamic shared quota,
-   so fresh projects with no usage history get the smallest slice.
+   so fresh projects with no usage history get the smallest slice. Also retry **503 UNAVAILABLE**
+   ("high demand") — transient model overload, separate from quota. Have a **fallback backend**
+   ready (AI Studio key, or an off-GCP model via LiteLLM/Groq) so dev isn't blocked when one
+   surface is throttled — gate behind a single config flag, don't fork the code.
+
+4b. **Dependency conflicts.** Adding a bridge lib can drag in versions another lib rejects
+   (here `litellm` pulled `websockets 16.0`, but `google-adk` needs `<16`). Pin the shared dep to
+   the stricter range in requirements; read pip's conflict warning — it names the exact bound.
 
 5. **Repo & interpreter sync (Cloud Shell loop).** `git pull` before every run; install deps
    into the **same** interpreter you invoke (`python -m pip`, watch `/usr/bin/python` vs others).
 
 6. **Shell gotchas.** Heredoc terminators must be at column 0; prefer `printf` to write config
-   files to avoid paste-indentation corruption.
+   files to avoid paste-indentation corruption. A line-continuation `\` must be the **last**
+   character on the line — a **trailing space after `\`** breaks the continuation and the next
+   line runs as a command. For secrets, append single lines with `echo 'KEY=val' >> .env` rather
+   than fighting multi-line paste. Never set env via `export` (dies on restart — see §2).
 
 7. **Workflow shape that worked here.** Claude (Windows) writes → commits → pushes; user pulls
    in **Cloud Shell** (where the SA + Vertex auth work) and runs. Windows lacks `gcloud`, so all
