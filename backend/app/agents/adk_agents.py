@@ -1,11 +1,13 @@
 """ADK agents for the Beacon swarm.
 
-Starts with the Triage agent rebuilt as a real Google ADK LlmAgent. Run this module
-directly as a smoke test to confirm the ADK API in the current environment before we
-expand to the full swarm. Config (project, location, SA key path) comes from
-backend/.env — no terminal `export` needed:
+A real Google ADK swarm (Intake → Triage → Escalation/Responder). Runs in two modes,
+selected by GOOGLE_GENAI_USE_VERTEXAI in backend/.env (see app/config.py):
+  • aistudio — Gemini Developer API via GOOGLE_API_KEY (active now; Vertex quota drained)
+  • vertex   — Gemini on Vertex AI via the beacon-vertex SA (tomorrow; flip the one flag)
+Both paths stay live — switching is a one-line .env edit, no code changes, no exports.
 
-    cd backend && python -m app.agents.adk_agents
+    cd backend && python -m app.agents.adk_agents          # full swarm demo
+    cd backend && python -m app.agents.adk_agents smoke     # triage-only smoke test
 """
 from __future__ import annotations
 
@@ -19,7 +21,7 @@ from google.adk.runners import InMemoryRunner
 from google.genai import types
 
 from app.agents.triage import SYSTEM_INSTRUCTION
-from app.config import TRIAGE_MODEL
+from app.config import MODE, TRIAGE_MODEL
 from app.data_loader import load_dataset
 from app.schemas import (
     EscalationDecision,
@@ -378,7 +380,8 @@ def _swarm_demo(batch_size: int | None = None) -> None:
     """
     import google.adk
 
-    print(f"google-adk version: {getattr(google.adk, '__version__', 'unknown')}\n")
+    print(f"google-adk version: {getattr(google.adk, '__version__', 'unknown')}  "
+          f"| mode: {MODE.upper()} | model: {TRIAGE_MODEL}\n")
     batch = _pick_demo_batch(_ds.all_messages)
     if batch_size is None:
         batch_size = int(os.getenv("DEMO_BATCH_SIZE", str(len(batch))))
@@ -413,7 +416,8 @@ def _swarm_demo(batch_size: int | None = None) -> None:
 def _smoke_test() -> None:
     import google.adk
 
-    print(f"google-adk version: {getattr(google.adk, '__version__', 'unknown')}\n")
+    print(f"google-adk version: {getattr(google.adk, '__version__', 'unknown')}  "
+          f"| mode: {MODE.upper()} | model: {TRIAGE_MODEL}\n")
     samples = [
         "We are trapped on the roof, water is rising and my child can't swim. Help now!",
         "Is Hat Yai airport open today? Just planning my trip.",

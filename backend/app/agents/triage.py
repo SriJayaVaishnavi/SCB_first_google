@@ -14,7 +14,7 @@ from google import genai
 from google.genai import types
 from google.genai.errors import ClientError
 
-from app.config import CONFIDENCE_FLOOR, LOCATION, PROJECT, TRIAGE_MODEL, USE_VERTEXAI
+from app.config import API_KEY, CONFIDENCE_FLOOR, LOCATION, PROJECT, TRIAGE_MODEL, USE_VERTEXAI
 from app.schemas import ESCALATE_UP, Severity, TriageResult
 
 SYSTEM_INSTRUCTION = """You are the Triage Agent for a national foreign ministry's
@@ -53,9 +53,12 @@ Classify this message. Return severity (P1–P4), a short category, your confide
 
 @lru_cache(maxsize=1)
 def _client() -> genai.Client:
+    # ── MODE: Vertex AI ── (GOOGLE_GENAI_USE_VERTEXAI=true). Kept live for tomorrow.
     if USE_VERTEXAI:
         return genai.Client(vertexai=True, project=PROJECT, location=LOCATION)
-    return genai.Client()  # falls back to GEMINI_API_KEY if Vertex disabled
+    # ── MODE: AI Studio ── (Gemini Developer API). Active now while the Vertex daily
+    # quota is drained. Explicit api_key from config; falls back to SDK env discovery.
+    return genai.Client(api_key=API_KEY) if API_KEY else genai.Client()
 
 
 def _generate_with_backoff(client, model, contents, config, max_retries=6):
