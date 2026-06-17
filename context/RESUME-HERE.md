@@ -106,7 +106,11 @@ all Vertex runs happen in Cloud Shell.
   detail + Confirm/Override, Beacon-vs-FIFO scoreboard, agent trace). Frontend typecheck +
   `next build` pass (Next 14.2.35). Run: backend `uvicorn app.api:app --port 8000`, frontend
   `npm install && npm run dev`. Not yet run end-to-end together against live LLM.
-- ⬜ **Phase 6** Dockerize + `gcloud run deploy`.
+- 🟡 **Phase 6** Dockerize + Cloud Run — **scaffolded** (`6555994`): `backend/Dockerfile`,
+  `frontend/Dockerfile` (Next standalone, API URL as build arg) + `cloudbuild.yaml`, and
+  **`DEPLOY.md`** (full Vertex-mode runbook: backend via runtime SA + `roles/aiplatform.user`,
+  build+deploy dashboard with baked API URL, CORS lock, smoke test). **Deploy mode = Vertex**
+  (user's pick). Not yet executed — needs (1) local verification, (2) the Vertex per-day quota bump.
 - ⬜ **Phase 7** Surge-replay demo + baseline-vs-Beacon scoreboard.
 
 ## Key files
