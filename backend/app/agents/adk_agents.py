@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 
 from google.adk.agents import LlmAgent
 from google.adk.runners import InMemoryRunner
@@ -128,14 +129,38 @@ async def _invoke(agent: LlmAgent, text: str) -> str:
     return final
 
 
+def _is_rate_limit(exc: Exception) -> bool:
+    """True for Vertex 429s — surfaced either as genai ClientError or ADK's wrapper."""
+    blob = f"{type(exc).__name__}: {exc}"
+    return "429" in blob or "RESOURCE_EXHAUSTED" in blob or "ResourceExhausted" in blob
+
+
+def _run(agent: LlmAgent, text: str, *, max_retries: int = 6) -> str:
+    """Invoke an ADK agent with exponential backoff on Vertex 429s.
+
+    ADK does its own brief retries then raises; new-project Gemini quota is low, so we
+    back off and retry here (mirrors the direct-genai path's _generate_with_backoff).
+    """
+    delay = 4.0
+    for attempt in range(max_retries):
+        try:
+            return asyncio.run(_invoke(agent, text))
+        except Exception as exc:  # noqa: BLE001 — narrow via _is_rate_limit below
+            if _is_rate_limit(exc) and attempt < max_retries - 1:
+                print(f"    [429 rate-limited on {agent.name}; retrying in {delay:.0f}s…]")
+                time.sleep(delay)
+                delay = min(delay * 2, 60)
+                continue
+            raise
+    raise RuntimeError("unreachable")  # pragma: no cover
+
+
 def triage_via_adk(text: str) -> TriageResult:
-    raw = asyncio.run(_invoke(triage_agent, text))
-    return TriageResult.model_validate_json(raw)
+    return TriageResult.model_validate_json(_run(triage_agent, text))
 
 
 def intake_via_adk(text: str) -> IntakeResult:
-    raw = asyncio.run(_invoke(intake_agent, text))
-    return IntakeResult.model_validate_json(raw)
+    return IntakeResult.model_validate_json(_run(intake_agent, text))
 
 
 def escalation_via_adk(text: str, triage: TriageResult) -> EscalationDecision:
@@ -146,14 +171,12 @@ def escalation_via_adk(text: str, triage: TriageResult) -> EscalationDecision:
         f"SOP reference: {triage.sop_reference}\n"
         f'Citizen message: """{text}"""'
     )
-    raw = asyncio.run(_invoke(escalation_agent, case))
-    return EscalationDecision.model_validate_json(raw)
+    return EscalationDecision.model_validate_json(_run(escalation_agent, case))
 
 
 def responder_via_adk(text: str, triage: TriageResult) -> ResponderDraft:
     query = f'Routine query (category {triage.category}):\n"""{text}"""'
-    raw = asyncio.run(_invoke(responder_agent, query))
-    return ResponderDraft.model_validate_json(raw)
+    return ResponderDraft.model_validate_json(_run(responder_agent, query))
 
 
 def run_swarm(messages: list[dict]) -> list[SwarmCase]:
