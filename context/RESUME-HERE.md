@@ -100,8 +100,12 @@ all Vertex runs happen in Cloud Shell.
   test passed on Vertex (14:08). Hardened for flaky quota (pacing, 429+503 retries,
   `QuotaExhausted`, call meter) + **3 backend modes** (vertex|aistudio|groq). Remaining: confirm a
   clean full run, then re-run the eval gate on Vertex tomorrow.
-- ⬜ **Phase 5** FastAPI (`/simulate` SSE) + Next.js dashboard (live queue, case detail, ops
-  scoreboard, agent trace). User wants ADK first, THEN dashboard.
+- ✅ **Phase 5** **BUILT.** FastAPI `app/api.py` (`POST /simulate` SSE, `GET /queue`,
+  `POST /case/{id}/confirm`, `/reset`, `/` health) + `stream_swarm()`. Next.js dashboard in
+  `frontend/` (dark command console, IBM Plex, live danger-ranked queue with pulsing P1s, case
+  detail + Confirm/Override, Beacon-vs-FIFO scoreboard, agent trace). Frontend typecheck +
+  `next build` pass (Next 14.2.35). Run: backend `uvicorn app.api:app --port 8000`, frontend
+  `npm install && npm run dev`. Not yet run end-to-end together against live LLM.
 - ⬜ **Phase 6** Dockerize + `gcloud run deploy`.
 - ⬜ **Phase 7** Surge-replay demo + baseline-vs-Beacon scoreboard.
 

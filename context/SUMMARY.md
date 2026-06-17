@@ -34,10 +34,14 @@ Build as ADK agents with a visible handoff trace:
 - **Responder** — draft a safe reply for P4 routine queries (human confirms).
 - `run_swarm(messages) -> ranked queue with trace`. Test on a small batch first.
 
-### Step C — API + dashboard (Phase 5)
-- FastAPI: `POST /simulate` (SSE stream of the surge), `GET /queue`, `POST /case/{id}/confirm`.
-- Next.js dashboard: live triage queue (P1 red at top), case detail (reason + SOP + draft +
-  Confirm/Override), ops scoreboard (Beacon vs FIFO "90 min → seconds"), agent-trace panel.
+### Step C — API + dashboard (Phase 5) ✅ BUILT
+- FastAPI `backend/app/api.py`: `POST /simulate` (SSE), `GET /queue`, `POST /case/{id}/confirm`,
+  `/reset`, `/` health. `stream_swarm()` yields cases as triaged.
+- Next.js dashboard `frontend/`: dark command console, live danger-ranked queue (P1 pulsing at
+  top), case detail (reason + SOP + routed action / draft + Confirm/Override), Beacon-vs-FIFO
+  scoreboard, agent-trace panel. `tsc` + `next build` pass.
+- Run: `uvicorn app.api:app --port 8000` + (in `frontend/`) `npm install && npm run dev`.
+  Set `NEXT_PUBLIC_API_URL` to the backend URL. Pending: run together vs a live LLM.
 
 ### Step D — deploy (Phase 6)
 - Dockerise backend + frontend; `gcloud run deploy` both to `rapidbuildsingapore` (us-central1).

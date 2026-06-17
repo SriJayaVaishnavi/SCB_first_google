@@ -31,6 +31,8 @@ Times are local (Asia/Kolkata, the dev machine). Commit hashes link to the repo
 | 16:2x | `pip install litellm` | `dependency conflict: google-adk requires websockets<16.0.0 but you have websockets 16.0` | litellm pulled websockets 16.0, outside ADK's pinned range | pin `websockets>=15.0.1,<16.0.0` in requirements + install it (`29d22b9`); litellm works on <16 |
 | 16:3x | Write Groq `.env` (heredoc/printf) | `bash: GROQ_MODEL=…: No such file or directory`; only BEACON_MODE + GROQ_API_KEY landed | a **trailing space after the `\`** broke printf's line continuation, so the next line ran as a command | harmless — `GROQ_MODEL` defaults in config; add it cleanly with `echo '…' >> .env` if wanted. (Lesson → shell gotchas) |
 
+| 16:xx | Phase 5 build (`a96dad1`, `935cdb4`) | clean — backend FastAPI SSE + Next.js dashboard; frontend `tsc`+`next build` pass | `next@14.2.5` flagged a security advisory on install | bump to `next@^14.2.35` (patched); rebuild clean. Backend mode-agnostic (runs on the active `.env` mode). Pending: run both together against a live LLM (Groq) |
+
 > **Correction (15:1x):** earlier rows called the quota "near-zero" — wrong. Phase 3's eval
 > completed ~60 Vertex calls, so the quota is usable. The real story is a **per-DAY cap**: fine
 > in the morning, drained by an afternoon of repeated testing (every 429'd retry is a billable
