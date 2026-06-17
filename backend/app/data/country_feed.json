@@ -1,0 +1,29 @@
+{
+  "generated_at": "2026-06-17T02:00:00Z",
+  "note": "SYNTHETIC live country-conditions feed for the prototype. Not real.",
+  "active_incidents": [
+    {
+      "id": "INC-HATYAI-FLOOD",
+      "location": "Hat Yai & Songkhla, Southern Thailand",
+      "type": "severe flooding",
+      "status": "ESCALATING",
+      "summary": "Record monsoon rainfall has flooded Hat Yai city centre. Hat Yai International Airport partially closed; rail links to Bangkok suspended; several districts without power. Rescue operations ongoing.",
+      "advisory": "Defer all non-essential travel to Songkhla province. Singaporeans in the area should move to higher ground and register with the Duty Office.",
+      "nearest_mission": "Embassy of Singapore, Bangkok (with honorary consul support, Songkhla)"
+    },
+    {
+      "id": "INC-ME-AIRSPACE",
+      "location": "Middle East (Gulf airspace)",
+      "type": "airspace / travel disruption",
+      "status": "ACTIVE",
+      "summary": "Heightened tensions have led to intermittent airspace closures and large-scale flight cancellations through Doha and Dubai hubs. Knock-on delays across connecting routes.",
+      "advisory": "Confirm flight status directly with carriers. Avoid non-essential transit through affected hubs.",
+      "nearest_mission": "High Commission of Singapore, Abu Dhabi"
+    }
+  ],
+  "missions": [
+    "Embassy of Singapore, Bangkok",
+    "High Commission of Singapore, Abu Dhabi",
+    "Singapore Duty Office (HQ, 24/7)"
+  ]
+}
