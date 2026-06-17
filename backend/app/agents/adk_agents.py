@@ -19,7 +19,14 @@ from google.genai import types
 from app.agents.triage import SYSTEM_INSTRUCTION
 from app.config import TRIAGE_MODEL
 from app.data_loader import load_dataset
-from app.schemas import TriageResult
+from app.schemas import (
+    EscalationDecision,
+    IntakeResult,
+    ResponderDraft,
+    Severity,
+    SwarmCase,
+    TriageResult,
+)
 
 APP_NAME = "beacon"
 
@@ -44,6 +51,68 @@ triage_agent = LlmAgent(
     output_key="triage_result",
 )
 
+# --- Intake: normalise/translate each raw inbound message ----------------------------
+INTAKE_INSTRUCTION = (
+    "You are the Intake Agent for a national foreign ministry's 24/7 consular Duty Office "
+    "crisis hotline. You receive ONE raw inbound citizen message (any language, possibly "
+    "messy or with typos).\n\n"
+    "Produce a clean ENGLISH normalisation of it. Detect the original language. If it is not "
+    "English, translate it faithfully into English and set translated=true; if it is already "
+    "English, return a lightly cleaned copy and set translated=false. NEVER add, drop, or infer "
+    "facts — preserve every detail relevant to urgency (location, injuries, numbers, names).\n\n"
+    "Return ONLY the structured intake result."
+)
+intake_agent = LlmAgent(
+    name="intake_agent",
+    model=TRIAGE_MODEL,
+    description="Normalises and translates one raw inbound message into clean English.",
+    instruction=INTAKE_INSTRUCTION,
+    output_schema=IntakeResult,
+    output_key="intake_result",
+)
+
+# --- Escalation: route urgent (P1/P2) cases to a mission with a concrete action ------
+ESCALATION_INSTRUCTION = (
+    "You are the Escalation Agent for a consular Duty Office during a crisis. You receive ONE "
+    "triaged URGENT case (its severity, category, triage reason, SOP reference, and the citizen's "
+    "message). Decide the single most appropriate NEXT ACTION for the duty officer and WHICH "
+    "mission/desk to route it to. Use the live country-conditions feed below to pick the right "
+    "mission. Keep the action concrete, immediate, and SOP-aligned (e.g. 'Call citizen, confirm "
+    "GPS pin, task local rescue liaison'). Do NOT contact anyone yourself — you only advise; a "
+    "human duty officer confirms.\n\n## Live country-conditions feed\n"
+    + json.dumps(_ds.country_feed)
+    + "\n\nReturn ONLY the structured escalation decision."
+)
+escalation_agent = LlmAgent(
+    name="escalation_agent",
+    model=TRIAGE_MODEL,
+    description="Routes an urgent case to a mission with a concrete suggested action.",
+    instruction=ESCALATION_INSTRUCTION,
+    output_schema=EscalationDecision,
+    output_key="escalation_decision",
+)
+
+# --- Responder: draft a safe reply for routine (P4) queries --------------------------
+RESPONDER_INSTRUCTION = (
+    "You are the Responder Agent for a consular Duty Office. You receive ONE ROUTINE (P4) "
+    "consular query. Draft a SAFE, factual, empathetic reply the duty officer can review, confirm, "
+    "and send. Use ONLY facts present in the SOP and the country-conditions feed below. NEVER "
+    "promise outcomes, give medical/legal/travel-safety guarantees, or invent details; if the "
+    "answer is uncertain, advise the citizen to contact the nearest mission. Keep it short and "
+    "clear. This is a DRAFT pending human confirmation — nothing is sent automatically.\n\n"
+    "## SOP\n" + _ds.sop + "\n\n## Live country-conditions feed\n"
+    + json.dumps(_ds.country_feed)
+    + "\n\nReturn ONLY the structured draft reply."
+)
+responder_agent = LlmAgent(
+    name="responder_agent",
+    model=TRIAGE_MODEL,
+    description="Drafts a safe, human-confirmed reply for routine queries.",
+    instruction=RESPONDER_INSTRUCTION,
+    output_schema=ResponderDraft,
+    output_key="responder_draft",
+)
+
 
 async def _invoke(agent: LlmAgent, text: str) -> str:
     """Run an ADK agent on one message; return the final response text."""
@@ -64,6 +133,136 @@ def triage_via_adk(text: str) -> TriageResult:
     return TriageResult.model_validate_json(raw)
 
 
+def intake_via_adk(text: str) -> IntakeResult:
+    raw = asyncio.run(_invoke(intake_agent, text))
+    return IntakeResult.model_validate_json(raw)
+
+
+def escalation_via_adk(text: str, triage: TriageResult) -> EscalationDecision:
+    case = (
+        f"Severity: {triage.severity.value}\n"
+        f"Category: {triage.category}\n"
+        f"Triage reason: {triage.reason}\n"
+        f"SOP reference: {triage.sop_reference}\n"
+        f'Citizen message: """{text}"""'
+    )
+    raw = asyncio.run(_invoke(escalation_agent, case))
+    return EscalationDecision.model_validate_json(raw)
+
+
+def responder_via_adk(text: str, triage: TriageResult) -> ResponderDraft:
+    query = f'Routine query (category {triage.category}):\n"""{text}"""'
+    raw = asyncio.run(_invoke(responder_agent, query))
+    return ResponderDraft.model_validate_json(raw)
+
+
+def run_swarm(messages: list[dict]) -> list[SwarmCase]:
+    """Run the full Beacon swarm over a batch of inbound messages.
+
+    Per message: Intake → Triage, then a danger-aware handoff —
+      • P1/P2 → Escalation (route to a mission with a suggested action)
+      • P3    → held for officer assistance
+      • P4    → Responder (drafts a safe reply for human confirmation)
+    Returns the cases ranked by danger (P1 first, ties broken by confidence), each
+    carrying an ordered agent-handoff trace. Nothing is auto-dismissed.
+    """
+    cases: list[SwarmCase] = []
+    for m in messages:
+        text = m.get("text", "")
+        trace: list[str] = []
+
+        intake = intake_via_adk(text)
+        trace.append(f"Intake → lang={intake.language}, translated={intake.translated}")
+
+        triage = triage_via_adk(intake.normalized_text)
+        trace.append(
+            f"Triage → {triage.severity.value} {triage.category} "
+            f"(conf {triage.confidence:.2f}, {triage.sop_reference})"
+        )
+
+        escalation: EscalationDecision | None = None
+        responder: ResponderDraft | None = None
+        if triage.severity in (Severity.P1, Severity.P2):
+            escalation = escalation_via_adk(text, triage)
+            trace.append(f"Escalation → {escalation.target_mission}: {escalation.suggested_action}")
+        elif triage.severity is Severity.P4:
+            responder = responder_via_adk(text, triage)
+            trace.append("Responder → drafted reply (awaiting human confirm)")
+        else:  # P3
+            trace.append("Hold → P3 queued for officer assistance")
+
+        cases.append(
+            SwarmCase(
+                id=m.get("id", ""),
+                channel=m.get("channel", ""),
+                original_text=text,
+                intake=intake,
+                triage=triage,
+                escalation=escalation,
+                responder=responder,
+                trace=trace,
+            )
+        )
+
+    cases.sort(key=lambda c: (c.triage.severity.rank, -c.triage.confidence))
+    return cases
+
+
+# The synthetic dataset is English-only, so inject one non-English message to exercise
+# the Intake translation path in the demo. Thai P1 (medical emergency in Hat Yai):
+# "My mother can't breathe and we're trapped by the flood in Hat Yai — please help now."
+_DEMO_NON_EN = {
+    "id": "MSG-DEMO-TH",
+    "text": "แม่หายใจไม่ออก เราติดอยู่กับน้ำท่วมที่หาดใหญ่ ช่วยด้วยเดี๋ยวนี้",
+    "channel": "whatsapp",
+    "lang": "th",
+    "true_label": "P1",
+}
+
+
+def _pick_demo_batch(messages: list[dict]) -> list[dict]:
+    """A small, representative batch: one of each P1–P4 plus a non-English message."""
+    batch: list[dict] = []
+    seen: set[str] = set()
+
+    def take(predicate) -> None:
+        for m in messages:
+            if m["id"] not in seen and predicate(m):
+                batch.append(m)
+                seen.add(m["id"])
+                return
+
+    for label in ("P1", "P2", "P3", "P4"):
+        take(lambda m, lbl=label: m.get("true_label") == lbl)
+    # Show Intake translation: a real non-English message if the data has one, else the synthetic one.
+    before = len(batch)
+    take(lambda m: m.get("lang") != "en")
+    if len(batch) == before:
+        batch.append(_DEMO_NON_EN)
+    return batch
+
+
+def _swarm_demo() -> None:
+    import google.adk
+
+    print(f"google-adk version: {getattr(google.adk, '__version__', 'unknown')}\n")
+    batch = _pick_demo_batch(_ds.all_messages)
+    print(f"Running the Beacon swarm over {len(batch)} sample messages…\n")
+    queue = run_swarm(batch)
+
+    print(f"=== Beacon swarm — ranked queue ({len(queue)} cases) ===\n")
+    for i, c in enumerate(queue, 1):
+        print(f"#{i}  [{c.triage.severity.value}] conf={c.triage.confidence:.2f}  "
+              f"{c.id} ({c.channel})  cat={c.triage.category}")
+        print(f"    msg : {c.original_text}")
+        if c.escalation:
+            print(f"    act : {c.escalation.target_mission} — {c.escalation.suggested_action}")
+        if c.responder:
+            print(f"    draft: {c.responder.draft_reply}")
+        print(f"    trace: {' | '.join(c.trace)}\n")
+    print("Swarm demo OK — Intake→Triage→Escalation/Responder with ranked queue + trace.")
+
+
 def _smoke_test() -> None:
     import google.adk
 
@@ -81,4 +280,11 @@ def _smoke_test() -> None:
 
 
 if __name__ == "__main__":
-    _smoke_test()
+    # `python -m app.agents.adk_agents`        → full swarm demo on a small batch
+    # `python -m app.agents.adk_agents smoke`  → just the Triage smoke test
+    import sys
+
+    if len(sys.argv) > 1 and sys.argv[1] == "smoke":
+        _smoke_test()
+    else:
+        _swarm_demo()
